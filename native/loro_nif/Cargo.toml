@@ -1,0 +1,33 @@
+[package]
+name = "loro_nif"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["LoroEx contributors"]
+license = "Apache-2.0"
+description = "Rustler NIF exposing the Loro CRDT library to Elixir"
+publish = false
+
+[lib]
+name = "loro_nif"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pin rustler and loro exactly. Both move fast and API breaks are common.
+rustler = { version = "0.37", default-features = false, features = ["derive", "nif_version_2_17"] }
+loro = "1.10"
+# For JSON interop on get_map_json etc.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Loro perf depends heavily on LTO. Turn it on for release builds.
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+# Strip debug symbols but keep line tables for panic backtraces.
+strip = "debuginfo"
+
+[profile.dev]
+# Loro is slow without optimizations; keep the dev loop usable.
+opt-level = 1

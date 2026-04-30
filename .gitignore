@@ -1,0 +1,34 @@
+# Elixir / Mix
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+
+# Dialyzer
+/priv/plts/*.plt
+/priv/plts/*.plt.hash
+
+# Compiled NIF outputs
+/priv/native/
+native/*/target/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+.elixir_ls/
+.lexical/
+
+# Git metadata backups — never commit. Paranoia after a one-time mishap.
+.git.*.bak/
+.git.*.bak
+*.git.bak/
+*.git.bak

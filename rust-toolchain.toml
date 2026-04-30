@@ -1,0 +1,6 @@
+# Rustler 0.37 requires rustc >= 1.91.
+# We pin to 'stable' and rely on the hex-stored rustler version for the
+# actual minimum — CI should install latest stable.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
