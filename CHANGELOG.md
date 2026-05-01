@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-05-01
+
+### Fixed
+- **`jason` is now a declared runtime dependency.** v0.5.0 called
+  `Jason.encode!/1` and `Jason.decode!/1` from `text_to_delta/2`,
+  `text_apply_delta/3`, `text_get_richtext_value/2`, and every
+  `LoroEx.Presence` function, but never declared `:jason` in
+  `mix.exs`. Applications that didn't already have Jason
+  transitively via another dep would crash at runtime with
+  `UndefinedFunctionError`. Caught by dialyzer once it had a full
+  PLT; fixed by adding `{:jason, "~> 1.4"}` as a runtime dep.
+
+### Added
+- **CI workflow** at `.github/workflows/ci.yml`. Runs on every push
+  and pull request to `main`: `mix format --check-formatted`,
+  `mix credo --strict`, `mix dialyzer`, `cargo fmt --check`,
+  `cargo clippy -D warnings`, `mix test --include nif`, `mix docs`
+  (fails on any warning). Seven parallel jobs with per-job caching
+  of `deps`, `_build`, and the Rust target directory.
+
+### Changed
+- `mix format` run across the tree — minor style fixes in
+  `lib/loro_ex.ex`, `mix.exs`, and `test/loro_ex_test.exs`. No
+  behavior change.
+
 ## [0.5.0] — 2026-05-01
 
 ### Added

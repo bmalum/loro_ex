@@ -1,7 +1,7 @@
 defmodule LoroEx.MixProject do
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.5.1"
   @source_url "https://github.com/bmalum/loro_ex"
 
   def project do
@@ -34,6 +34,7 @@ defmodule LoroEx.MixProject do
     [
       # Runtime
       {:rustler, "~> 0.37"},
+      {:jason, "~> 1.4"},
       # Optional: use rustler_precompiled once we publish signed NIF artifacts.
       # {:rustler_precompiled, "~> 0.8"},
 
@@ -98,7 +99,7 @@ defmodule LoroEx.MixProject do
       groups_for_modules: [
         "Main API": [LoroEx],
         "Collaboration primitives": [LoroEx.UndoManager, LoroEx.Presence],
-        "NIF": [LoroEx.Native]
+        NIF: [LoroEx.Native]
       ],
       source_ref: "v#{@version}"
     ]

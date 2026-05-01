@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel older runs on the same ref when a new push lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MIX_ENV: test
+  # Makes `mix` behave non-interactively.
+  ELIXIR_CLI_DRY_RUN: "false"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Pure-Elixir jobs (don't need Rust). Run in parallel; fast feedback.
+  # ---------------------------------------------------------------------------
+  elixir-format:
+    name: mix format --check-formatted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
+      - name: Restore deps cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+      - run: mix deps.get
+      - run: mix format --check-formatted
+
+  credo:
+    name: mix credo --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+      - run: mix deps.get
+      - run: mix credo --strict
+
+  dialyzer:
+    name: mix dialyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+      # Separate cache for the PLT — it's slow to build (~30s) and only
+      # changes when Elixir / OTP / deps versions change.
+      - uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-plt-
+      - run: mix deps.get
+      - run: mix dialyzer --plt
+      - run: mix dialyzer
+
+  # ---------------------------------------------------------------------------
+  # Rust-side linting. Doesn't need a BEAM install.
+  # ---------------------------------------------------------------------------
+  rust-fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path native/loro_nif/Cargo.toml -- --check
+
+  rust-clippy:
+    name: cargo clippy -D warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/loro_nif
+      - run: cargo clippy --manifest-path native/loro_nif/Cargo.toml -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Full NIF-backed test run. Slowest job (first build compiles Loro).
+  # ---------------------------------------------------------------------------
+  nif-test:
+    name: mix test --include nif
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/loro_nif
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-test-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-test-
+      - run: mix deps.get
+      # Warm the NIF compile; mix will call cargo build under the hood.
+      - run: mix compile
+      - run: mix test --include nif
+
+  # ---------------------------------------------------------------------------
+  # Docs build. Guards against ExDoc regressions (broken xrefs, missing files).
+  # ---------------------------------------------------------------------------
+  docs:
+    name: mix docs
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.2"
+          elixir-version: "1.18.2"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-docs-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-docs-
+      - run: mix deps.get
+      # `mix docs` succeeds even with warnings; fail the job if any are emitted.
+      - name: Build docs (fail on warnings)
+        run: |
+          set -o pipefail
+          mix docs 2>&1 | tee /tmp/docs.log
+          if grep -qE "^warning:|^     warning:" /tmp/docs.log; then
+            echo "::error::mix docs emitted warnings"
+            exit 1
+          fi

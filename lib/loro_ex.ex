@@ -696,7 +696,8 @@ defmodule LoroEx do
   def text_len(doc, container_id, :utf16), do: Native.text_len_utf16(doc, container_id)
 
   def text_len(_doc, _container_id, unit),
-    do: {:error, {:invalid_value, "unit must be :unicode | :utf8 | :utf16, got: #{inspect(unit)}"}}
+    do:
+      {:error, {:invalid_value, "unit must be :unicode | :utf8 | :utf16, got: #{inspect(unit)}"}}
 
   @doc """
   Convert a text position from one unit system to another.

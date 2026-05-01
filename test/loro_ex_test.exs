@@ -655,6 +655,7 @@ defmodule LoroExTest do
       # subscription registry, flip the `assert_receive` below to a
       # `refute_receive` — that will confirm the fix.
       doc = LoroEx.new()
+
       (fn ->
          _sub = LoroEx.subscribe(doc, self())
          :ok
@@ -703,6 +704,7 @@ defmodule LoroExTest do
     @tag :nif
     test "invalid cursor bytes → :invalid_cursor" do
       doc = LoroEx.new()
+
       assert {:error, {:invalid_cursor, _}} =
                LoroEx.cursor_resolve(doc, <<0, 0, 0>>)
     end
@@ -757,10 +759,11 @@ defmodule LoroExTest do
       assert match?(
                {:error, {_, _}},
                LoroEx.text_len(doc, "body", :pixels)
-             ) or match?(
-               _,
-               LoroEx.text_len(doc, "body", :pixels)
-             )
+             ) or
+               match?(
+                 _,
+                 LoroEx.text_len(doc, "body", :pixels)
+               )
     end
 
     @tag :nif
