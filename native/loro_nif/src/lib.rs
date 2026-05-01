@@ -10,9 +10,9 @@
 //!    thread; Loro operations mutate internal state. We use `Mutex` rather
 //!    than `RwLock` because writes are the hot path.
 //!
-//! 3. Version vectors cross the NIF boundary as opaque binaries produced by
-//!    `oplog_version` / `state_vector`. Callers must treat them as opaque.
-//!    Decoding happens inside Rust so Elixir can't mix them up.
+//! 3. Version vectors, frontiers, and cursors cross the NIF boundary as
+//!    opaque binaries produced by `encode()`. Callers must treat them as
+//!    opaque. Decoding happens inside Rust so Elixir can't mix them up.
 //!
 //! 4. Return values prefer `OwnedBinary` over `Vec<u8>` to avoid a second
 //!    heap copy into the BEAM.
@@ -28,8 +28,10 @@ use rustler::{
 use std::sync::Mutex;
 
 use loro::{
-    ExportMode, Frontiers, LoroDoc, LoroEncodeError, LoroError, LoroTreeError, LoroValue,
-    Subscription, TreeID, VersionVector,
+    awareness::EphemeralStore,
+    cursor::{Cursor, PosType, Side},
+    ContainerID, ContainerType, ExportMode, Frontiers, LoroDoc, LoroEncodeError, LoroError,
+    LoroTreeError, LoroValue, Subscription, TextDelta, TreeID, UndoManager, VersionVector,
 };
 
 mod atoms {
@@ -37,14 +39,16 @@ mod atoms {
         ok,
         error,
 
-        // Error reason atoms — map Loro's error enums onto stable atoms so
-        // Elixir callers can pattern-match instead of parsing debug strings.
+        // Error reason atoms
         invalid_update,
         invalid_version_vector,
         invalid_frontier,
         invalid_tree_id,
         invalid_peer_id,
         invalid_value,
+        invalid_cursor,
+        invalid_delta,
+        invalid_container_kind,
         checksum_mismatch,
         incompatible_version,
         not_found,
@@ -54,12 +58,29 @@ mod atoms {
         fractional_index_not_enabled,
         index_out_of_bound,
         container_deleted,
+        history_cleared,
+        id_not_found,
         lock_poisoned,
         subscription_dropped,
+        ephemeral_apply_failed,
         unknown,
 
-        // Event tags delivered to subscriber pids.
-        loro_event
+        // Side atoms
+        left,
+        middle,
+        right,
+
+        // Container kind atoms
+        text,
+        map,
+        list,
+        movable_list,
+        tree,
+
+        // Event tags
+        loro_event,
+        loro_diff,
+        loro_ephemeral
     }
 }
 
@@ -80,9 +101,6 @@ impl DocResource {
 #[rustler::resource_impl]
 impl rustler::Resource for DocResource {}
 
-/// Holds a Loro `Subscription` handle. Dropping it cancels the subscription.
-/// Wrapped in `Mutex<Option<_>>` so `unsubscribe/1` can eagerly drop the
-/// handle before the resource itself is garbage-collected.
 pub struct SubscriptionResource {
     pub inner: Mutex<Option<Subscription>>,
 }
@@ -90,14 +108,26 @@ pub struct SubscriptionResource {
 #[rustler::resource_impl]
 impl rustler::Resource for SubscriptionResource {}
 
+pub struct UndoResource {
+    #[allow(dead_code)]
+    pub doc: ResourceArc<DocResource>,
+    pub inner: Mutex<UndoManager>,
+}
+
+#[rustler::resource_impl]
+impl rustler::Resource for UndoResource {}
+
+pub struct EphemeralResource {
+    pub inner: EphemeralStore,
+}
+
+#[rustler::resource_impl]
+impl rustler::Resource for EphemeralResource {}
+
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
 
-/// Convert a Loro error into a Rustler NIF error whose term shape is
-/// `{reason_atom, debug_string}`. Elixir callers get `{:error, {atom, str}}`
-/// and can match on the atom for control flow while keeping the string for
-/// logs.
 fn loro_err_to_nif(err: LoroError) -> NifError {
     let reason = match &err {
         LoroError::DecodeVersionVectorError => atoms::invalid_version_vector(),
@@ -129,9 +159,6 @@ fn encode_err_to_nif(err: LoroEncodeError) -> NifError {
     let reason = match &err {
         LoroEncodeError::FrontiersNotFound(_) => atoms::not_found(),
         LoroEncodeError::ShallowSnapshotIncompatibleWithOldFormat => atoms::incompatible_version(),
-        LoroEncodeError::UnknownContainer => atoms::unknown(),
-        LoroEncodeError::InternalError(_) => atoms::unknown(),
-        // non_exhaustive enum — catch future variants
         _ => atoms::unknown(),
     };
     NifError::Term(Box::new((reason, format!("{err}"))))
@@ -146,7 +173,11 @@ fn json_err_to_nif(err: serde_json::Error) -> NifError {
 }
 
 fn poisoned_to_nif() -> NifError {
-    NifError::Term(Box::new((atoms::lock_poisoned(), "doc mutex poisoned")))
+    NifError::Term(Box::new((atoms::lock_poisoned(), "mutex poisoned")))
+}
+
+fn invalid_value_err(detail: &str) -> NifError {
+    NifError::Term(Box::new((atoms::invalid_value(), detail.to_string())))
 }
 
 fn bytes_to_owned_binary(bytes: &[u8]) -> NifResult<OwnedBinary> {
@@ -161,8 +192,134 @@ fn parse_tree_id(s: &str) -> NifResult<TreeID> {
 }
 
 fn ensure_tree_ready(tree: &loro::LoroTree) {
-    // Safe to call repeatedly — Loro dedupes.
     tree.enable_fractional_index(0);
+}
+
+// ---------------------------------------------------------------------------
+// Container-id resolution
+// ---------------------------------------------------------------------------
+
+fn try_parse_container_id(s: &str) -> Option<ContainerID> {
+    ContainerID::try_from(s).ok()
+}
+
+fn get_text_handle(doc: &LoroDoc, id: &str) -> loro::LoroText {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_text(cid),
+        None => doc.get_text(id),
+    }
+}
+
+fn get_map_handle(doc: &LoroDoc, id: &str) -> loro::LoroMap {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_map(cid),
+        None => doc.get_map(id),
+    }
+}
+
+fn get_list_handle(doc: &LoroDoc, id: &str) -> loro::LoroList {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_list(cid),
+        None => doc.get_list(id),
+    }
+}
+
+fn get_tree_handle(doc: &LoroDoc, id: &str) -> loro::LoroTree {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_tree(cid),
+        None => doc.get_tree(id),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON ↔ LoroValue
+// ---------------------------------------------------------------------------
+
+fn json_to_loro_value(v: serde_json::Value) -> NifResult<LoroValue> {
+    match v {
+        serde_json::Value::Null => Ok(LoroValue::Null),
+        serde_json::Value::Bool(b) => Ok(LoroValue::Bool(b)),
+        serde_json::Value::String(s) => Ok(LoroValue::String(s.into())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(LoroValue::I64(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(LoroValue::Double(f))
+            } else {
+                Err(invalid_value_err("number out of range"))
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(invalid_value_err(
+            "objects and arrays are not scalar; use container init APIs",
+        )),
+    }
+}
+
+fn parse_scalar_json(s: &str) -> NifResult<LoroValue> {
+    let parsed: serde_json::Value = serde_json::from_str(s).map_err(json_err_to_nif)?;
+    json_to_loro_value(parsed)
+}
+
+// ---------------------------------------------------------------------------
+// Atom decoders
+// ---------------------------------------------------------------------------
+
+fn atom_to_container_type(a: Atom) -> NifResult<ContainerType> {
+    if a == atoms::text() {
+        Ok(ContainerType::Text)
+    } else if a == atoms::map() {
+        Ok(ContainerType::Map)
+    } else if a == atoms::list() {
+        Ok(ContainerType::List)
+    } else if a == atoms::movable_list() {
+        Ok(ContainerType::MovableList)
+    } else if a == atoms::tree() {
+        Ok(ContainerType::Tree)
+    } else {
+        Err(NifError::Term(Box::new((
+            atoms::invalid_container_kind(),
+            "expected :text | :map | :list | :movable_list | :tree".to_string(),
+        ))))
+    }
+}
+
+fn atom_to_side(a: Atom) -> NifResult<Side> {
+    if a == atoms::left() {
+        Ok(Side::Left)
+    } else if a == atoms::middle() {
+        Ok(Side::Middle)
+    } else if a == atoms::right() {
+        Ok(Side::Right)
+    } else {
+        Err(NifError::Term(Box::new((
+            atoms::invalid_cursor(),
+            "side must be :left | :middle | :right".to_string(),
+        ))))
+    }
+}
+
+fn side_to_atom(s: Side) -> Atom {
+    match s {
+        Side::Left => atoms::left(),
+        Side::Middle => atoms::middle(),
+        Side::Right => atoms::right(),
+    }
+}
+
+fn atom_to_postype(a: Atom) -> NifResult<PosType> {
+    rustler::atoms! { unicode, utf8, utf16 }
+    if a == unicode() {
+        Ok(PosType::Unicode)
+    } else if a == utf8() {
+        Ok(PosType::Bytes)
+    } else if a == utf16() {
+        Ok(PosType::Utf16)
+    } else {
+        Err(NifError::Term(Box::new((
+            atoms::invalid_value(),
+            "pos unit must be :unicode | :utf8 | :utf16".to_string(),
+        ))))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,56 +387,41 @@ fn export_updates_from(
 #[rustler::nif(schedule = "DirtyCpu")]
 fn oplog_version(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let vv = guard.oplog_vv();
-    bytes_to_owned_binary(&vv.encode())
+    bytes_to_owned_binary(&guard.oplog_vv().encode())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn state_vector(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let vv = guard.state_vv();
-    bytes_to_owned_binary(&vv.encode())
+    bytes_to_owned_binary(&guard.state_vv().encode())
 }
 
-/// Current op-log frontier. Distinct from the version vector:
-/// frontiers are a set of op ids, not per-peer counters. The binary
-/// returned here round-trips through `Frontiers::encode` /
-/// `Frontiers::decode` and is what `export_shallow_snapshot/2`
-/// expects.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn oplog_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let f = guard.oplog_frontiers();
-    bytes_to_owned_binary(&f.encode())
+    bytes_to_owned_binary(&guard.oplog_frontiers().encode())
 }
 
-/// Current state frontier. May lag the op-log frontier when there
-/// are pending commits.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn state_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let f = guard.state_frontiers();
-    bytes_to_owned_binary(&f.encode())
+    bytes_to_owned_binary(&guard.state_frontiers().encode())
 }
 
-/// The frontier after which this doc's history is truncated. Useful
-/// when hydrating a shallow snapshot and you want to know where its
-/// baseline starts.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn shallow_since_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let f = guard.shallow_since_frontiers();
-    bytes_to_owned_binary(&f.encode())
+    bytes_to_owned_binary(&guard.shallow_since_frontiers().encode())
 }
 
 // ---------------------------------------------------------------------------
-// Text
+// Text (plain)
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyCpu")]
 fn get_text(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    Ok(guard.get_text(container_id.as_str()).to_string())
+    Ok(get_text_handle(&guard, &container_id).to_string())
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -290,7 +432,7 @@ fn insert_text(
     value: String,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let text = guard.get_text(container_id.as_str());
+    let text = get_text_handle(&guard, &container_id);
     text.insert(pos as usize, &value).map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
@@ -304,11 +446,198 @@ fn delete_text(
     len: u32,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let text = guard.get_text(container_id.as_str());
+    let text = get_text_handle(&guard, &container_id);
     text.delete(pos as usize, len as usize)
         .map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
+}
+
+// ---------------------------------------------------------------------------
+// Text (rich-text / Peritext)
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_mark(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    start: u32,
+    end: u32,
+    key: String,
+    value_json: String,
+) -> NifResult<Atom> {
+    let value = parse_scalar_json(&value_json)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    text.mark(start as usize..end as usize, &key, value)
+        .map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_unmark(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    start: u32,
+    end: u32,
+    key: String,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    text.unmark(start as usize..end as usize, &key)
+        .map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_to_delta(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    let delta = text.to_delta();
+    serde_json::to_string(&delta).map_err(json_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_apply_delta(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    delta_json: String,
+) -> NifResult<Atom> {
+    let delta: Vec<TextDelta> = serde_json::from_str(&delta_json).map_err(|e| {
+        NifError::Term(Box::new((atoms::invalid_delta(), format!("{e}"))))
+    })?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    text.apply_delta(&delta).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_get_richtext_value(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    let value = text.get_richtext_value();
+    serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_len_unicode(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(get_text_handle(&guard, &container_id).len_unicode() as u64)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_len_utf8(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(get_text_handle(&guard, &container_id).len_utf8() as u64)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_len_utf16(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(get_text_handle(&guard, &container_id).len_utf16() as u64)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_convert_pos(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    from: Atom,
+    to: Atom,
+) -> NifResult<u64> {
+    let from_ty = atom_to_postype(from)?;
+    let to_ty = atom_to_postype(to)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    text.convert_pos(index as usize, from_ty, to_ty)
+        .map(|v| v as u64)
+        .ok_or_else(|| {
+            NifError::Term(Box::new((
+                atoms::out_of_bound(),
+                "position is not at a valid boundary".to_string(),
+            )))
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Cursor
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn text_get_cursor<'a>(
+    env: rustler::Env<'a>,
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    side: Atom,
+) -> NifResult<rustler::Term<'a>> {
+    let side = atom_to_side(side)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let text = get_text_handle(&guard, &container_id);
+    match text.get_cursor(pos as usize, side) {
+        Some(cursor) => {
+            let encoded = cursor.encode();
+            let mut bin = rustler::NewBinary::new(env, encoded.len());
+            bin.as_mut_slice().copy_from_slice(&encoded);
+            let term: rustler::Term = bin.into();
+            Ok(term)
+        }
+        None => Ok(rustler::types::atom::nil().to_term(env)),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_get_cursor<'a>(
+    env: rustler::Env<'a>,
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    side: Atom,
+) -> NifResult<rustler::Term<'a>> {
+    let side = atom_to_side(side)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    match list.get_cursor(pos as usize, side) {
+        Some(cursor) => {
+            let encoded = cursor.encode();
+            let mut bin = rustler::NewBinary::new(env, encoded.len());
+            bin.as_mut_slice().copy_from_slice(&encoded);
+            let term: rustler::Term = bin.into();
+            Ok(term)
+        }
+        None => Ok(rustler::types::atom::nil().to_term(env)),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn cursor_resolve(
+    doc: ResourceArc<DocResource>,
+    cursor_bin: Binary,
+) -> NifResult<(u64, Atom)> {
+    let cursor = Cursor::decode(cursor_bin.as_slice()).map_err(|e| {
+        NifError::Term(Box::new((atoms::invalid_cursor(), format!("{e}"))))
+    })?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    match guard.get_cursor_pos(&cursor) {
+        Ok(result) => Ok((result.current.pos as u64, side_to_atom(result.current.side))),
+        Err(e) => {
+            let reason = match e {
+                loro::cursor::CannotFindRelativePosition::ContainerDeleted => {
+                    atoms::container_deleted()
+                }
+                loro::cursor::CannotFindRelativePosition::HistoryCleared => atoms::history_cleared(),
+                loro::cursor::CannotFindRelativePosition::IdNotFound => atoms::id_not_found(),
+            };
+            Err(NifError::Term(Box::new((reason, format!("{e}")))))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,19 +647,10 @@ fn delete_text(
 #[rustler::nif(schedule = "DirtyCpu")]
 fn get_map_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let value = guard.get_map(container_id.as_str()).get_deep_value();
+    let value = get_map_handle(&guard, &container_id).get_deep_value();
     serde_json::to_string(&value).map_err(json_err_to_nif)
 }
 
-/// Set a key on a root-level Map container. The value is a JSON string
-/// limited to scalars (null / bool / number / string). Objects and arrays
-/// are rejected with `:invalid_value` — nested containers can be added via
-/// a dedicated API later.
-///
-/// Example:
-///   map_set(doc, "comments", "c1", ~s("{\"body\":\"hi\"}"))   # string value
-///   map_set(doc, "settings", "theme", ~s("\"dark\""))          # string
-///   map_set(doc, "settings", "count", ~s("3"))                 # number
 #[rustler::nif(schedule = "DirtyCpu")]
 fn map_set(
     doc: ResourceArc<DocResource>,
@@ -338,11 +658,9 @@ fn map_set(
     key: String,
     value_json: String,
 ) -> NifResult<Atom> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(&value_json).map_err(json_err_to_nif)?;
-    let loro_value = json_to_loro_value(parsed)?;
+    let loro_value = parse_scalar_json(&value_json)?;
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let map = guard.get_map(container_id.as_str());
+    let map = get_map_handle(&guard, &container_id);
     map.insert(&key, loro_value).map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
@@ -355,15 +673,12 @@ fn map_delete(
     key: String,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let map = guard.get_map(container_id.as_str());
+    let map = get_map_handle(&guard, &container_id);
     map.delete(&key).map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
 }
 
-/// Read a single map key. Returns the JSON encoding of the value, or
-/// `"null"` if the key doesn't exist. Deep-resolves nested containers
-/// (matches `get_map_json`'s behavior).
 #[rustler::nif(schedule = "DirtyCpu")]
 fn map_get_json(
     doc: ResourceArc<DocResource>,
@@ -371,19 +686,56 @@ fn map_get_json(
     key: String,
 ) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let map = guard.get_map(container_id.as_str());
-    // `get_deep_value()` returns the whole map; we index into it afterwards
-    // so we don't have to handle `ValueOrContainer` → JSON ourselves.
+    let map = get_map_handle(&guard, &container_id);
     match map.get_deep_value() {
         LoroValue::Map(m) => {
-            let v = m
-                .get(key.as_str())
-                .cloned()
-                .unwrap_or(LoroValue::Null);
+            let v = m.get(key.as_str()).cloned().unwrap_or(LoroValue::Null);
             serde_json::to_string(&v).map_err(json_err_to_nif)
         }
         _ => Ok("null".to_string()),
     }
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_insert_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::ContainerTrait;
+    let kind = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = get_map_handle(&guard, &container_id);
+    let cid_str = match kind {
+        ContainerType::Text => map
+            .insert_container(&key, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => map
+            .insert_container(&key, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => map
+            .insert_container(&key, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => map
+            .insert_container(&key, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
 }
 
 // ---------------------------------------------------------------------------
@@ -393,23 +745,19 @@ fn map_get_json(
 #[rustler::nif(schedule = "DirtyCpu")]
 fn list_get_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let value = guard.get_list(container_id.as_str()).get_deep_value();
+    let value = get_list_handle(&guard, &container_id).get_deep_value();
     serde_json::to_string(&value).map_err(json_err_to_nif)
 }
 
-/// Append a scalar value to a List container. Shapes allowed match
-/// `map_set`: null / bool / number / string.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn list_push(
     doc: ResourceArc<DocResource>,
     container_id: String,
     value_json: String,
 ) -> NifResult<Atom> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(&value_json).map_err(json_err_to_nif)?;
-    let loro_value = json_to_loro_value(parsed)?;
+    let loro_value = parse_scalar_json(&value_json)?;
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let list = guard.get_list(container_id.as_str());
+    let list = get_list_handle(&guard, &container_id);
     list.push(loro_value).map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
@@ -423,45 +771,58 @@ fn list_delete(
     len: u32,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let list = guard.get_list(container_id.as_str());
+    let list = get_list_handle(&guard, &container_id);
     list.delete(index as usize, len as usize)
         .map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
 }
 
-/// Convert a parsed JSON value into a scalar `LoroValue`. Container-shaped
-/// values (object / array) return `:invalid_value` — use container-init
-/// APIs for nested structure. Numbers that fit in i64 are encoded as `I64`
-/// (stable integer identity); otherwise encoded as `Double`.
-fn json_to_loro_value(v: serde_json::Value) -> NifResult<LoroValue> {
-    match v {
-        serde_json::Value::Null => Ok(LoroValue::Null),
-        serde_json::Value::Bool(b) => Ok(LoroValue::Bool(b)),
-        serde_json::Value::String(s) => Ok(LoroValue::String(s.into())),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(LoroValue::I64(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(LoroValue::Double(f))
-            } else {
-                Err(NifError::Term(Box::new((
-                    atoms::invalid_value(),
-                    "number out of range".to_string(),
-                ))))
-            }
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_insert_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::ContainerTrait;
+    let kind = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    let p = pos as usize;
+    let cid_str = match kind {
+        ContainerType::Text => list
+            .insert_container(p, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => list
+            .insert_container(p, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => list
+            .insert_container(p, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => list
+            .insert_container(p, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
         }
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(NifError::Term(
-            Box::new((
-                atoms::invalid_value(),
-                "objects and arrays are not scalar; use list/map container init APIs".to_string(),
-            )),
-        )),
-    }
+    };
+    guard.commit();
+    Ok(cid_str)
 }
 
 // ---------------------------------------------------------------------------
-// Movable tree
+// Tree
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -471,7 +832,7 @@ fn tree_create_node(
     parent_id: Option<String>,
 ) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let tree = guard.get_tree(tree_id.as_str());
+    let tree = get_tree_handle(&guard, &tree_id);
     ensure_tree_ready(&tree);
     let parent: Option<TreeID> = match parent_id {
         Some(p) => Some(parse_tree_id(&p)?),
@@ -491,7 +852,7 @@ fn tree_move_node(
     index: u32,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let tree = guard.get_tree(tree_id.as_str());
+    let tree = get_tree_handle(&guard, &tree_id);
     ensure_tree_ready(&tree);
     let node = parse_tree_id(&node_id)?;
     let parent: Option<TreeID> = match new_parent_id {
@@ -511,7 +872,7 @@ fn tree_delete_node(
     node_id: String,
 ) -> NifResult<Atom> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let tree = guard.get_tree(tree_id.as_str());
+    let tree = get_tree_handle(&guard, &tree_id);
     let node = parse_tree_id(&node_id)?;
     tree.delete(node).map_err(loro_err_to_nif)?;
     guard.commit();
@@ -521,88 +882,477 @@ fn tree_delete_node(
 #[rustler::nif(schedule = "DirtyCpu")]
 fn tree_get_nodes(doc: ResourceArc<DocResource>, tree_id: String) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-    let value = guard.get_tree(tree_id.as_str()).get_value();
+    let value = get_tree_handle(&guard, &tree_id).get_value();
     serde_json::to_string(&value).map_err(json_err_to_nif)
 }
 
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_get_meta(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    node_id: String,
+) -> NifResult<String> {
+    use loro::ContainerTrait;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    let node = parse_tree_id(&node_id)?;
+    let meta_map = tree.get_meta(node).map_err(loro_err_to_nif)?;
+    Ok(meta_map.id().to_string())
+}
+
 // ---------------------------------------------------------------------------
-// Subscriptions
+// Local-update subscriptions
 // ---------------------------------------------------------------------------
 
-/// Subscribe `pid` to local-update events on this doc. The subscribed pid
-/// receives messages of the shape:
-///
-///   `{:loro_event, subscription_ref, update_bytes}`
-///
-/// where `update_bytes` is a binary that can be fed into `apply_update/2`
-/// on a peer doc. This matches Loro's `subscribe_local_update` API.
-///
-/// ## Re-entrancy
-///
-/// The callback runs inside Loro's `commit()` / `import()` call path while
-/// the doc mutex is already held by the caller thread. The callback MUST
-/// NOT try to acquire the mutex again. Here we only encode and send — no
-/// doc access.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn subscribe(
     doc: ResourceArc<DocResource>,
     pid: LocalPid,
 ) -> NifResult<ResourceArc<SubscriptionResource>> {
-    // Create the subscription resource up front so the callback can capture
-    // its pid for the `loro_event` tuple. We use a plain Arc<Mutex<Option>>
-    // pattern: Option::Some while active, None after unsubscribe.
     let sub_resource = ResourceArc::new(SubscriptionResource {
         inner: Mutex::new(None),
     });
-
-    // The subscription handle itself is what Loro hands back; stash it in
-    // the resource so drop/unsubscribe can cancel.
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
-
-    // Build the subscription resource, then clone the Arc into the callback
-    // so the message tuple can include it as the `subscription_ref`.
     let sub_for_callback = sub_resource.clone();
     let subscription = guard.subscribe_local_update(Box::new(move |update_bytes: &Vec<u8>| {
         let target = pid;
         let bytes = update_bytes.clone();
         let sub_ref = sub_for_callback.clone();
-        // Sending from inside `commit()` / `import()` happens on a BEAM
-        // scheduler thread, where `OwnedEnv::send_and_clear` panics. We
-        // spawn a short-lived thread per event to get us onto an unmanaged
-        // thread. Replace with a dedicated background thread + mpsc channel
-        // before high-throughput use.
         std::thread::spawn(move || {
             let mut msg_env = OwnedEnv::new();
             let _ = msg_env.send_and_clear(&target, |env| {
-                // Encode bytes as a BEAM binary (not a list).
                 let mut new_bin = rustler::NewBinary::new(env, bytes.len());
                 new_bin.as_mut_slice().copy_from_slice(&bytes);
                 let bin_term: rustler::Term = new_bin.into();
                 (atoms::loro_event(), sub_ref, bin_term).encode(env)
             });
         });
-        // Keep the subscription active.
         true
     }));
-
-    // Stash the Subscription handle inside the resource.
     if let Ok(mut slot) = sub_resource.inner.lock() {
         *slot = Some(subscription);
     } else {
         return Err(poisoned_to_nif());
     }
-
     Ok(sub_resource)
 }
 
-/// Cancel a subscription. Safe to call more than once; second call is a
-/// no-op. Does nothing if the subscription was already dropped via GC.
 #[rustler::nif(schedule = "DirtyCpu")]
 fn unsubscribe(sub: ResourceArc<SubscriptionResource>) -> NifResult<Atom> {
     let mut slot = sub.inner.lock().map_err(|_| poisoned_to_nif())?;
-    // Dropping the Subscription is what actually cancels.
     *slot = None;
     Ok(atoms::ok())
+}
+
+// ---------------------------------------------------------------------------
+// Structured diff subscriptions
+// ---------------------------------------------------------------------------
+
+fn serialize_diff_events(events: &[loro::event::ContainerDiff<'_>]) -> serde_json::Value {
+    let mut arr: Vec<serde_json::Value> = Vec::with_capacity(events.len());
+    for ev in events {
+        let path: Vec<serde_json::Value> = ev
+            .path
+            .iter()
+            .map(|(cid, idx)| {
+                serde_json::json!([cid.to_string(), index_to_json(idx)])
+            })
+            .collect();
+        let diff_json = match &ev.diff {
+            loro::event::Diff::Text(deltas) => {
+                serde_json::json!({
+                    "type": "text",
+                    "ops": serde_json::to_value(deltas).unwrap_or(serde_json::Value::Null),
+                })
+            }
+            loro::event::Diff::Map(map_delta) => {
+                let updated: serde_json::Map<String, serde_json::Value> = map_delta
+                    .updated
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            Some(voc) => serde_json::to_value(voc.get_deep_value())
+                                .unwrap_or(serde_json::Value::Null),
+                            None => serde_json::Value::Null,
+                        };
+                        (k.to_string(), val)
+                    })
+                    .collect();
+                serde_json::json!({"type": "map", "updated": updated})
+            }
+            loro::event::Diff::List(items) => {
+                let ops: Vec<serde_json::Value> = items
+                    .iter()
+                    .map(|item| match item {
+                        loro::event::ListDiffItem::Insert { insert, is_move } => {
+                            let vals: Vec<serde_json::Value> = insert
+                                .iter()
+                                .map(|voc| {
+                                    serde_json::to_value(voc.get_deep_value())
+                                        .unwrap_or(serde_json::Value::Null)
+                                })
+                                .collect();
+                            serde_json::json!({"insert": vals, "is_move": is_move})
+                        }
+                        loro::event::ListDiffItem::Delete { delete } => {
+                            serde_json::json!({"delete": delete})
+                        }
+                        loro::event::ListDiffItem::Retain { retain } => {
+                            serde_json::json!({"retain": retain})
+                        }
+                    })
+                    .collect();
+                serde_json::json!({"type": "list", "ops": ops})
+            }
+            loro::event::Diff::Tree(tree_diff) => {
+                let items: Vec<serde_json::Value> = tree_diff
+                    .as_ref()
+                    .diff
+                    .iter()
+                    .map(serialize_tree_diff_item)
+                    .collect();
+                serde_json::json!({"type": "tree", "diff": items})
+            }
+            loro::event::Diff::Counter(n) => {
+                serde_json::json!({"type": "counter", "delta": n})
+            }
+            loro::event::Diff::Unknown => serde_json::json!({"type": "unknown"}),
+        };
+        arr.push(serde_json::json!({
+            "target": ev.target.to_string(),
+            "path": path,
+            "diff": diff_json,
+        }));
+    }
+    serde_json::Value::Array(arr)
+}
+
+fn index_to_json(idx: &loro::Index) -> serde_json::Value {
+    match idx {
+        loro::Index::Key(k) => serde_json::Value::String(k.to_string()),
+        loro::Index::Seq(n) => serde_json::Value::from(*n as u64),
+        loro::Index::Node(t) => serde_json::Value::String(t.to_string()),
+    }
+}
+
+fn serialize_tree_diff_item(item: &loro::TreeDiffItem) -> serde_json::Value {
+    use loro::TreeExternalDiff;
+    let target = item.target.to_string();
+    match &item.action {
+        TreeExternalDiff::Create {
+            parent,
+            index,
+            position,
+        } => serde_json::json!({
+            "target": target,
+            "action": "create",
+            "parent": tree_parent_to_json(parent),
+            "index": *index as u64,
+            "position": position.to_string(),
+        }),
+        TreeExternalDiff::Move {
+            parent,
+            index,
+            position,
+            old_parent,
+            old_index,
+        } => serde_json::json!({
+            "target": target,
+            "action": "move",
+            "parent": tree_parent_to_json(parent),
+            "index": *index as u64,
+            "position": position.to_string(),
+            "old_parent": tree_parent_to_json(old_parent),
+            "old_index": *old_index as u64,
+        }),
+        TreeExternalDiff::Delete {
+            old_parent,
+            old_index,
+        } => serde_json::json!({
+            "target": target,
+            "action": "delete",
+            "old_parent": tree_parent_to_json(old_parent),
+            "old_index": *old_index as u64,
+        }),
+    }
+}
+
+fn tree_parent_to_json(p: &loro::TreeParentId) -> serde_json::Value {
+    match p {
+        loro::TreeParentId::Node(id) => serde_json::Value::String(id.to_string()),
+        loro::TreeParentId::Root => serde_json::Value::Null,
+        loro::TreeParentId::Deleted => serde_json::Value::String("__deleted__".to_string()),
+        loro::TreeParentId::Unexist => serde_json::Value::String("__unexist__".to_string()),
+    }
+}
+
+fn deliver_diff_event(
+    target: LocalPid,
+    sub_ref: ResourceArc<SubscriptionResource>,
+    events_value: serde_json::Value,
+) {
+    std::thread::spawn(move || {
+        let Ok(json_str) = serde_json::to_string(&events_value) else {
+            return;
+        };
+        let mut msg_env = OwnedEnv::new();
+        let _ = msg_env.send_and_clear(&target, |env| {
+            let mut bin = rustler::NewBinary::new(env, json_str.len());
+            bin.as_mut_slice().copy_from_slice(json_str.as_bytes());
+            let bin_term: rustler::Term = bin.into();
+            (atoms::loro_diff(), sub_ref, bin_term).encode(env)
+        });
+    });
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn subscribe_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pid: LocalPid,
+) -> NifResult<ResourceArc<SubscriptionResource>> {
+    let cid = ContainerID::try_from(container_id.as_str()).or_else(|_| {
+        let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+        let candidates = [
+            ContainerID::new_root(&container_id, ContainerType::Text),
+            ContainerID::new_root(&container_id, ContainerType::Map),
+            ContainerID::new_root(&container_id, ContainerType::List),
+            ContainerID::new_root(&container_id, ContainerType::MovableList),
+            ContainerID::new_root(&container_id, ContainerType::Tree),
+        ];
+        for c in candidates {
+            if guard.has_container(&c) {
+                return Ok::<_, NifError>(c);
+            }
+        }
+        Err(NifError::Term(Box::new((
+            atoms::not_found(),
+            format!("container {container_id} not found"),
+        ))))
+    })?;
+
+    let sub_resource = ResourceArc::new(SubscriptionResource {
+        inner: Mutex::new(None),
+    });
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let sub_for_callback = sub_resource.clone();
+    let subscription = guard.subscribe(
+        &cid,
+        std::sync::Arc::new(move |event: loro::event::DiffEvent| {
+            let events_value = serialize_diff_events(&event.events);
+            deliver_diff_event(pid, sub_for_callback.clone(), events_value);
+        }),
+    );
+    if let Ok(mut slot) = sub_resource.inner.lock() {
+        *slot = Some(subscription);
+    }
+    Ok(sub_resource)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn subscribe_root(
+    doc: ResourceArc<DocResource>,
+    pid: LocalPid,
+) -> NifResult<ResourceArc<SubscriptionResource>> {
+    let sub_resource = ResourceArc::new(SubscriptionResource {
+        inner: Mutex::new(None),
+    });
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let sub_for_callback = sub_resource.clone();
+    let subscription = guard.subscribe_root(std::sync::Arc::new(
+        move |event: loro::event::DiffEvent| {
+            let events_value = serialize_diff_events(&event.events);
+            deliver_diff_event(pid, sub_for_callback.clone(), events_value);
+        },
+    ));
+    if let Ok(mut slot) = sub_resource.inner.lock() {
+        *slot = Some(subscription);
+    }
+    Ok(sub_resource)
+}
+
+// ---------------------------------------------------------------------------
+// UndoManager
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_new(doc: ResourceArc<DocResource>) -> NifResult<ResourceArc<UndoResource>> {
+    let manager = {
+        let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+        UndoManager::new(&guard)
+    };
+    Ok(ResourceArc::new(UndoResource {
+        doc,
+        inner: Mutex::new(manager),
+    }))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_undo(mgr: ResourceArc<UndoResource>) -> NifResult<bool> {
+    let mut m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    m.undo().map_err(loro_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_redo(mgr: ResourceArc<UndoResource>) -> NifResult<bool> {
+    let mut m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    m.redo().map_err(loro_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_can_undo(mgr: ResourceArc<UndoResource>) -> NifResult<bool> {
+    let m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(m.can_undo())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_can_redo(mgr: ResourceArc<UndoResource>) -> NifResult<bool> {
+    let m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(m.can_redo())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_record_new_checkpoint(mgr: ResourceArc<UndoResource>) -> NifResult<Atom> {
+    let mut m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    m.record_new_checkpoint().map_err(loro_err_to_nif)?;
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_set_max_undo_steps(
+    mgr: ResourceArc<UndoResource>,
+    size: u32,
+) -> NifResult<Atom> {
+    let mut m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    m.set_max_undo_steps(size as usize);
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn undo_manager_set_merge_interval(
+    mgr: ResourceArc<UndoResource>,
+    interval_ms: i64,
+) -> NifResult<Atom> {
+    let mut m = mgr.inner.lock().map_err(|_| poisoned_to_nif())?;
+    m.set_merge_interval(interval_ms);
+    Ok(atoms::ok())
+}
+
+// ---------------------------------------------------------------------------
+// EphemeralStore
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_new(timeout_ms: i64) -> ResourceArc<EphemeralResource> {
+    ResourceArc::new(EphemeralResource {
+        inner: EphemeralStore::new(timeout_ms),
+    })
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_set(
+    store: ResourceArc<EphemeralResource>,
+    key: String,
+    value_json: String,
+) -> NifResult<Atom> {
+    let value = parse_scalar_json(&value_json)?;
+    store.inner.set(&key, value);
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_get(
+    store: ResourceArc<EphemeralResource>,
+    key: String,
+) -> NifResult<String> {
+    let val = store.inner.get(&key).unwrap_or(LoroValue::Null);
+    serde_json::to_string(&val).map_err(json_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_delete(
+    store: ResourceArc<EphemeralResource>,
+    key: String,
+) -> NifResult<Atom> {
+    store.inner.delete(&key);
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_keys(store: ResourceArc<EphemeralResource>) -> Vec<String> {
+    store.inner.keys()
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_get_all_states(store: ResourceArc<EphemeralResource>) -> NifResult<String> {
+    let states = store.inner.get_all_states();
+    let json_map: serde_json::Map<String, serde_json::Value> = states
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::to_value(v).unwrap_or(serde_json::Value::Null)))
+        .collect();
+    serde_json::to_string(&serde_json::Value::Object(json_map)).map_err(json_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_encode(
+    store: ResourceArc<EphemeralResource>,
+    key: String,
+) -> NifResult<OwnedBinary> {
+    bytes_to_owned_binary(&store.inner.encode(&key))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_encode_all(store: ResourceArc<EphemeralResource>) -> NifResult<OwnedBinary> {
+    bytes_to_owned_binary(&store.inner.encode_all())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_apply(
+    store: ResourceArc<EphemeralResource>,
+    data: Binary,
+) -> NifResult<Atom> {
+    store.inner.apply(data.as_slice()).map_err(|e| {
+        NifError::Term(Box::new((atoms::ephemeral_apply_failed(), e.to_string())))
+    })?;
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_remove_outdated(store: ResourceArc<EphemeralResource>) -> NifResult<Atom> {
+    store.inner.remove_outdated();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn ephemeral_subscribe(
+    store: ResourceArc<EphemeralResource>,
+    pid: LocalPid,
+) -> NifResult<ResourceArc<SubscriptionResource>> {
+    let sub_resource = ResourceArc::new(SubscriptionResource {
+        inner: Mutex::new(None),
+    });
+    let sub_for_callback = sub_resource.clone();
+    let subscription = store
+        .inner
+        .subscribe_local_updates(Box::new(move |bytes: &Vec<u8>| {
+            let target = pid;
+            let data = bytes.clone();
+            let sub_ref = sub_for_callback.clone();
+            std::thread::spawn(move || {
+                let mut msg_env = OwnedEnv::new();
+                let _ = msg_env.send_and_clear(&target, |env| {
+                    let mut new_bin = rustler::NewBinary::new(env, data.len());
+                    new_bin.as_mut_slice().copy_from_slice(&data);
+                    let bin_term: rustler::Term = new_bin.into();
+                    (atoms::loro_ephemeral(), sub_ref, bin_term).encode(env)
+                });
+            });
+            true
+        }));
+    if let Ok(mut slot) = sub_resource.inner.lock() {
+        *slot = Some(subscription);
+    }
+    Ok(sub_resource)
 }
 
 // ---------------------------------------------------------------------------

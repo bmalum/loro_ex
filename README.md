@@ -26,6 +26,7 @@ artifact publishing.
 - [How Loro works (short version)](#how-loro-works-short-version)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Guides](#guides)
 - [API overview](#api-overview)
 - [Architecture & invariants](#architecture--invariants)
 - [Building from source](#building-from-source)
@@ -129,7 +130,7 @@ def deps do
   [
     {:loro_ex,
      git: "https://github.com/bmalum/loro_ex.git",
-     tag: "v0.2.0"}
+     tag: "v0.5.0"}
   ]
 end
 ```
@@ -195,6 +196,19 @@ LoroEx.tree_get_nodes(doc, "blocks")
 # => JSON string with the full tree structure
 ```
 
+## Guides
+
+Task-oriented tutorials with runnable examples:
+
+- **[Getting started](docs/guides/getting_started.md)** — from `new()` to two-peer sync in ten minutes
+- **[Rich text](docs/guides/rich_text.md)** — Peritext marks, Quill deltas, editor integration
+- **[Sync & persistence](docs/guides/sync_and_persistence.md)** — snapshots vs deltas, server architecture, storage patterns
+- **[Presence & cursors](docs/guides/presence_and_cursors.md)** — multi-user state that survives concurrent edits
+- **[Tree & blocks](docs/guides/tree_and_blocks.md)** — Notion-style nested blocks with drag-to-reorder
+- **[Undo](docs/guides/undo.md)** — `Ctrl+Z` / `Ctrl+Shift+Z` with proper grouping
+
+Generate them locally as HTML with `mix docs`.
+
 ## API overview
 
 The full API is documented in the modules themselves; `mix docs`
@@ -211,25 +225,51 @@ generates HTML. High-level surface:
 - `LoroEx.export_shallow_snapshot/2` — trimmed snapshot starting at a
   frontier (for new joiners)
 - `LoroEx.export_updates/2` — delta since a version
-- `LoroEx.oplog_version/1` — opaque version vector (for diff-based sync)
-- `LoroEx.state_vector/1` — opaque state vector
+- `LoroEx.oplog_version/1`, `state_vector/1` — opaque version vectors
+- `LoroEx.oplog_frontiers/1`, `state_frontiers/1`,
+  `shallow_since_frontiers/1` — opaque frontiers
 
-### Text containers
+### Text containers — plain
 - `LoroEx.get_text/2`, `insert_text/4`, `delete_text/4`
+- `LoroEx.text_len/3` — count in `:unicode | :utf8 | :utf16`
+- `LoroEx.text_convert_pos/5` — translate between unit systems
+
+### Text containers — rich text (Peritext)
+- `LoroEx.text_mark/6`, `text_unmark/5` — apply and remove marks
+- `LoroEx.text_to_delta/2`, `text_apply_delta/3` — Quill-compatible deltas
+- `LoroEx.text_get_richtext_value/2` — decoded segment list
+
+### Cursors (stable positions)
+- `LoroEx.text_get_cursor/4`, `list_get_cursor/4` — produce an opaque cursor
+- `LoroEx.cursor_resolve/2` — resolve a cursor to its current `{pos, side}`
 
 ### Map containers
-- `LoroEx.get_map_json/2` (returns JSON string; decode on the caller's
-  schedule, not inside the NIF)
+- `LoroEx.get_map_json/2`, `map_set/4`, `map_delete/3`, `map_get_json/3`
+- `LoroEx.map_insert_container/4` — nest a text/map/list/movable_list
+
+### List containers
+- `LoroEx.list_get_json/2`, `list_push/3`, `list_delete/4`
+- `LoroEx.list_insert_container/4`
 
 ### Movable tree
 - `LoroEx.tree_create_node/3`, `tree_move_node/5`, `tree_delete_node/3`,
   `tree_get_nodes/2`
+- `LoroEx.tree_get_meta/3` — per-node metadata map
+
+### Undo / redo
+`LoroEx.UndoManager` — per-peer undo history. See the
+[Undo guide](docs/guides/undo.md).
+
+### Presence / awareness
+`LoroEx.Presence` — ephemeral KV with TTL for cursors, selections,
+typing indicators. See the
+[Presence & cursors guide](docs/guides/presence_and_cursors.md).
 
 ### Subscriptions
-- `LoroEx.subscribe/2` — the subscribed pid receives
-  `{:loro_event, subscription_ref, update_bytes}` on every commit, ready
-  to feed into `apply_update/2` on a peer doc.
-- `LoroEx.unsubscribe/1` — eager cancellation.
+- `LoroEx.subscribe/2` — raw local-update bytes for sync
+- `LoroEx.subscribe_container/3` — structured diff events per container
+- `LoroEx.subscribe_root/2` — structured diff events across the whole doc
+- `LoroEx.unsubscribe/1` — eager cancellation
 
 ## Architecture & invariants
 

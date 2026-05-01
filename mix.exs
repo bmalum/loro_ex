@@ -1,7 +1,7 @@
 defmodule LoroEx.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.0"
   @source_url "https://github.com/bmalum/loro_ex"
 
   def project do
@@ -79,7 +79,27 @@ defmodule LoroEx.MixProject do
   defp docs do
     [
       main: "LoroEx",
-      extras: ["README.md", "CHANGELOG.md"],
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        "docs/design.md",
+        "docs/guides/getting_started.md",
+        "docs/guides/rich_text.md",
+        "docs/guides/sync_and_persistence.md",
+        "docs/guides/presence_and_cursors.md",
+        "docs/guides/tree_and_blocks.md",
+        "docs/guides/undo.md"
+      ],
+      groups_for_extras: [
+        Guides: ~r/docs\/guides\//,
+        Internals: ~r/docs\/design\.md/
+      ],
+      groups_for_modules: [
+        "Main API": [LoroEx],
+        "Collaboration primitives": [LoroEx.UndoManager, LoroEx.Presence],
+        "NIF": [LoroEx.Native]
+      ],
       source_ref: "v#{@version}"
     ]
   end

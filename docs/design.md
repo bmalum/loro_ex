@@ -78,5 +78,5 @@ Target triples:
 ## Upstream version pinning
 
 Loro is pre-1.0 by semver attitude despite the 1.x major. Pin exactly in
-`Cargo.toml` (`loro = "=1.10.0"`) and bump deliberately after running
+`Cargo.toml` (`loro = "=1.12.0"`) and bump deliberately after running
 the full test suite.
