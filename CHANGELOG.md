@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-05-01
+
+### Changed
+- `cargo fmt` run across `native/loro_nif/src/lib.rs`. Pure
+  formatting; no behavior change. The 0.5.1 CI workflow caught
+  that the file had never been fmt'd, and the `cargo fmt --check`
+  job failed on the 0.5.1 commit. This patch resolves that so CI
+  is green on `main`.
+
 ## [0.5.1] — 2026-05-01
 
 ### Fixed
