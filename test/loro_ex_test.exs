@@ -210,6 +210,46 @@ defmodule LoroExTest do
     end
   end
 
+  describe "frontiers" do
+    @tag :nif
+    test "oplog_frontiers returns an opaque binary" do
+      doc = LoroEx.new()
+      f0 = LoroEx.oplog_frontiers(doc)
+      assert is_binary(f0)
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "x")
+
+      f1 = LoroEx.oplog_frontiers(doc)
+      assert is_binary(f1)
+      refute f1 == f0
+    end
+
+    @tag :nif
+    test "state_frontiers and shallow_since_frontiers are readable" do
+      doc = LoroEx.new()
+      assert is_binary(LoroEx.state_frontiers(doc))
+      assert is_binary(LoroEx.shallow_since_frontiers(doc))
+    end
+
+    @tag :nif
+    test "export_shallow_snapshot round-trips through a fresh doc" do
+      author = LoroEx.new(1)
+      :ok = LoroEx.insert_text(author, "body", 0, "baseline")
+
+      # Snapshot the doc at its current frontier. A shallow snapshot
+      # taken against the current frontier is effectively a full
+      # snapshot of the current state with no op history prior.
+      frontier = LoroEx.oplog_frontiers(author)
+      shallow = LoroEx.export_shallow_snapshot(author, frontier)
+      assert is_binary(shallow)
+
+      # Apply to a brand-new doc and check the text comes back.
+      reader = LoroEx.new(2)
+      :ok = LoroEx.apply_update(reader, shallow)
+      assert LoroEx.get_text(reader, "body") == "baseline"
+    end
+  end
+
   describe "error reasons" do
     @tag :nif
     test "invalid update bytes return :invalid_update" do

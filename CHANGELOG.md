@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-01
+
+### Added
+- `LoroEx.oplog_frontiers/1`, `state_frontiers/1`, and
+  `shallow_since_frontiers/1`. Frontiers are a distinct version type
+  from the existing version vectors — they're a set of op ids,
+  not a per-peer counter map. All three NIFs return an opaque binary
+  suitable for passing to `export_shallow_snapshot/2`.
+
+### Why
+Callers building shallow-snapshot storage tiers (Super Loop's
+time-travel reader, for example) need to capture the doc's current
+frontier so a later snapshot can be anchored against it. Without
+these the shallow snapshot API was not usable end-to-end from
+Elixir.
+
+### Tested
+New `frontiers` describe block with three `:nif` tests, including a
+round-trip that exports a shallow snapshot against the current
+frontier and hydrates a fresh doc from it.
+
 ## [0.3.0] — 2026-05-01
 
 ### Added

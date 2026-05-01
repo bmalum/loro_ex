@@ -134,6 +134,27 @@ defmodule LoroEx do
   @spec state_vector(doc()) :: version() | error()
   defdelegate state_vector(doc), to: Native
 
+  @doc """
+  Return the opaque op-log **frontier** for this document. Distinct
+  from `oplog_version/1` — a frontier is a set of op ids, not a
+  per-peer counter map. Use this with
+  `export_shallow_snapshot/2`.
+  """
+  @spec oplog_frontiers(doc()) :: frontier() | error()
+  defdelegate oplog_frontiers(doc), to: Native
+
+  @doc "State frontier. May lag `oplog_frontiers/1` when commits are pending."
+  @spec state_frontiers(doc()) :: frontier() | error()
+  defdelegate state_frontiers(doc), to: Native
+
+  @doc """
+  Frontier at which a shallow snapshot's history is truncated. Useful
+  for detecting whether a doc was hydrated from a shallow snapshot
+  and, if so, where its baseline begins.
+  """
+  @spec shallow_since_frontiers(doc()) :: frontier() | error()
+  defdelegate shallow_since_frontiers(doc), to: Native
+
   # Text ----------------------------------------------------------------------
 
   @spec get_text(doc(), container_id()) :: String.t() | error()

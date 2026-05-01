@@ -56,6 +56,15 @@ defmodule LoroEx.Native do
   @spec state_vector(doc()) :: binary() | error()
   def state_vector(_doc), do: :erlang.nif_error(:nif_not_loaded)
 
+  @spec oplog_frontiers(doc()) :: binary() | error()
+  def oplog_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec state_frontiers(doc()) :: binary() | error()
+  def state_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec shallow_since_frontiers(doc()) :: binary() | error()
+  def shallow_since_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
   # Text ----------------------------------------------------------------------
 
   @spec get_text(doc(), String.t()) :: String.t() | error()

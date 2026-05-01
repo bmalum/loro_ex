@@ -241,6 +241,37 @@ fn state_vector(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     bytes_to_owned_binary(&vv.encode())
 }
 
+/// Current op-log frontier. Distinct from the version vector:
+/// frontiers are a set of op ids, not per-peer counters. The binary
+/// returned here round-trips through `Frontiers::encode` /
+/// `Frontiers::decode` and is what `export_shallow_snapshot/2`
+/// expects.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn oplog_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let f = guard.oplog_frontiers();
+    bytes_to_owned_binary(&f.encode())
+}
+
+/// Current state frontier. May lag the op-log frontier when there
+/// are pending commits.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn state_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let f = guard.state_frontiers();
+    bytes_to_owned_binary(&f.encode())
+}
+
+/// The frontier after which this doc's history is truncated. Useful
+/// when hydrating a shallow snapshot and you want to know where its
+/// baseline starts.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn shallow_since_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let f = guard.shallow_since_frontiers();
+    bytes_to_owned_binary(&f.encode())
+}
+
 // ---------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------
