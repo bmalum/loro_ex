@@ -122,6 +122,94 @@ defmodule LoroExTest do
     end
   end
 
+  describe "map mutation" do
+    @tag :nif
+    test "set / get / delete on a root map" do
+      doc = LoroEx.new()
+
+      # Set a scalar of each shape
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("dark"))
+      :ok = LoroEx.map_set(doc, "settings", "font_size", "14")
+      :ok = LoroEx.map_set(doc, "settings", "spellcheck", "true")
+      :ok = LoroEx.map_set(doc, "settings", "cursor_blink", "null")
+
+      # Read the whole map back
+      all = LoroEx.get_map_json(doc, "settings") |> Jason.decode!()
+
+      assert all["theme"] == "dark"
+      assert all["font_size"] == 14
+      assert all["spellcheck"] == true
+      assert all["cursor_blink"] == nil
+
+      # Read a single key
+      assert LoroEx.map_get_json(doc, "settings", "theme") == ~s("dark")
+      assert LoroEx.map_get_json(doc, "settings", "missing") == "null"
+
+      # Delete
+      :ok = LoroEx.map_delete(doc, "settings", "theme")
+      refetched = LoroEx.get_map_json(doc, "settings") |> Jason.decode!()
+      refute Map.has_key?(refetched, "theme")
+    end
+
+    @tag :nif
+    test "map mutations converge across peers" do
+      a = LoroEx.new(1)
+      b = LoroEx.new(2)
+
+      :ok = LoroEx.map_set(a, "comments", "c1", ~s("from alice"))
+      :ok = LoroEx.map_set(b, "comments", "c2", ~s("from bob"))
+
+      :ok = LoroEx.apply_update(a, LoroEx.export_snapshot(b))
+      :ok = LoroEx.apply_update(b, LoroEx.export_snapshot(a))
+
+      a_map = LoroEx.get_map_json(a, "comments") |> Jason.decode!()
+      b_map = LoroEx.get_map_json(b, "comments") |> Jason.decode!()
+
+      assert a_map == b_map
+      assert a_map["c1"] == "from alice"
+      assert a_map["c2"] == "from bob"
+    end
+
+    @tag :nif
+    test "objects and arrays are rejected with :invalid_value" do
+      doc = LoroEx.new()
+
+      assert {:error, {:invalid_value, _}} =
+               LoroEx.map_set(doc, "m", "k", ~s({"nested": "value"}))
+
+      assert {:error, {:invalid_value, _}} =
+               LoroEx.map_set(doc, "m", "k", ~s([1, 2, 3]))
+    end
+  end
+
+  describe "list mutation" do
+    @tag :nif
+    test "push / get / delete on a root list" do
+      doc = LoroEx.new()
+
+      :ok = LoroEx.list_push(doc, "events", ~s("login"))
+      :ok = LoroEx.list_push(doc, "events", ~s("edit"))
+      :ok = LoroEx.list_push(doc, "events", ~s("logout"))
+
+      assert LoroEx.list_get_json(doc, "events") |> Jason.decode!() ==
+               ["login", "edit", "logout"]
+
+      # Delete the middle element
+      :ok = LoroEx.list_delete(doc, "events", 1, 1)
+
+      assert LoroEx.list_get_json(doc, "events") |> Jason.decode!() ==
+               ["login", "logout"]
+    end
+
+    @tag :nif
+    test "list push rejects non-scalar values" do
+      doc = LoroEx.new()
+
+      assert {:error, {:invalid_value, _}} =
+               LoroEx.list_push(doc, "events", ~s({"x": 1}))
+    end
+  end
+
   describe "error reasons" do
     @tag :nif
     test "invalid update bytes return :invalid_update" do

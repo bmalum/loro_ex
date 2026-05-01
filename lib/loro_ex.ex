@@ -33,6 +33,8 @@ defmodule LoroEx do
       or corrupted the bytes in transit.
     * `:invalid_frontier` — frontier bytes failed to decode.
     * `:invalid_tree_id` — tree node id string is not a valid `TreeID`.
+    * `:invalid_value` — JSON scalar expected but got an object, array,
+      or out-of-range number. Returned by `map_set/4`, `list_push/3`.
     * `:checksum_mismatch` — update bytes had a bad checksum.
     * `:incompatible_version` — encoding version from a newer Loro.
     * `:not_found` — container or frontier not in the doc.
@@ -67,6 +69,7 @@ defmodule LoroEx do
           | :invalid_frontier
           | :invalid_tree_id
           | :invalid_peer_id
+          | :invalid_value
           | :checksum_mismatch
           | :incompatible_version
           | :not_found
@@ -154,6 +157,56 @@ defmodule LoroEx do
   """
   @spec get_map_json(doc(), container_id()) :: String.t() | error()
   defdelegate get_map_json(doc, container_id), to: Native
+
+  @doc """
+  Set `key` on the map container `container_id` to the JSON-encoded scalar
+  `value_json`.
+
+  Only scalars are accepted: `null`, `true` / `false`, numbers, strings.
+  Objects and arrays return `{:error, {:invalid_value, _}}` — use
+  dedicated container-init APIs for nested structure (not yet exposed).
+
+  ## Examples
+
+      LoroEx.map_set(doc, "comments", "c1", ~s("{\\"body\\":\\"hi\\"}"))  # value is a JSON string
+      LoroEx.map_set(doc, "settings", "theme", ~s("\\"dark\\""))          # string
+      LoroEx.map_set(doc, "settings", "count", "3")                      # number
+  """
+  @spec map_set(doc(), container_id(), String.t(), String.t()) :: :ok | error()
+  defdelegate map_set(doc, container_id, key, value_json), to: Native
+
+  @doc "Delete `key` from the map container `container_id`."
+  @spec map_delete(doc(), container_id(), String.t()) :: :ok | error()
+  defdelegate map_delete(doc, container_id, key), to: Native
+
+  @doc """
+  Return the value at `key` in the map container `container_id` as a JSON
+  string. Returns `"null"` if the key doesn't exist.
+  """
+  @spec map_get_json(doc(), container_id(), String.t()) :: String.t() | error()
+  defdelegate map_get_json(doc, container_id, key), to: Native
+
+  # List ----------------------------------------------------------------------
+
+  @doc """
+  Return the contents of a list container as a JSON string.
+  """
+  @spec list_get_json(doc(), container_id()) :: String.t() | error()
+  defdelegate list_get_json(doc, container_id), to: Native
+
+  @doc """
+  Append `value_json` to the list container `container_id`. Scalar-only
+  rules identical to `map_set/4`.
+  """
+  @spec list_push(doc(), container_id(), String.t()) :: :ok | error()
+  defdelegate list_push(doc, container_id, value_json), to: Native
+
+  @doc """
+  Delete `len` elements starting at `index` from the list container.
+  """
+  @spec list_delete(doc(), container_id(), non_neg_integer(), non_neg_integer()) ::
+          :ok | error()
+  defdelegate list_delete(doc, container_id, index, len), to: Native
 
   # Tree ----------------------------------------------------------------------
 

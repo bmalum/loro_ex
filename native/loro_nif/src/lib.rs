@@ -28,8 +28,8 @@ use rustler::{
 use std::sync::Mutex;
 
 use loro::{
-    ExportMode, Frontiers, LoroDoc, LoroEncodeError, LoroError, LoroTreeError, Subscription,
-    TreeID, VersionVector,
+    ExportMode, Frontiers, LoroDoc, LoroEncodeError, LoroError, LoroTreeError, LoroValue,
+    Subscription, TreeID, VersionVector,
 };
 
 mod atoms {
@@ -44,6 +44,7 @@ mod atoms {
         invalid_frontier,
         invalid_tree_id,
         invalid_peer_id,
+        invalid_value,
         checksum_mismatch,
         incompatible_version,
         not_found,
@@ -288,6 +289,144 @@ fn get_map_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResul
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let value = guard.get_map(container_id.as_str()).get_deep_value();
     serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+/// Set a key on a root-level Map container. The value is a JSON string
+/// limited to scalars (null / bool / number / string). Objects and arrays
+/// are rejected with `:invalid_value` — nested containers can be added via
+/// a dedicated API later.
+///
+/// Example:
+///   map_set(doc, "comments", "c1", ~s("{\"body\":\"hi\"}"))   # string value
+///   map_set(doc, "settings", "theme", ~s("\"dark\""))          # string
+///   map_set(doc, "settings", "count", ~s("3"))                 # number
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_set(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+    value_json: String,
+) -> NifResult<Atom> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&value_json).map_err(json_err_to_nif)?;
+    let loro_value = json_to_loro_value(parsed)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = guard.get_map(container_id.as_str());
+    map.insert(&key, loro_value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_delete(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = guard.get_map(container_id.as_str());
+    map.delete(&key).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Read a single map key. Returns the JSON encoding of the value, or
+/// `"null"` if the key doesn't exist. Deep-resolves nested containers
+/// (matches `get_map_json`'s behavior).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_get_json(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = guard.get_map(container_id.as_str());
+    // `get_deep_value()` returns the whole map; we index into it afterwards
+    // so we don't have to handle `ValueOrContainer` → JSON ourselves.
+    match map.get_deep_value() {
+        LoroValue::Map(m) => {
+            let v = m
+                .get(key.as_str())
+                .cloned()
+                .unwrap_or(LoroValue::Null);
+            serde_json::to_string(&v).map_err(json_err_to_nif)
+        }
+        _ => Ok("null".to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List
+// ---------------------------------------------------------------------------
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_get_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let value = guard.get_list(container_id.as_str()).get_deep_value();
+    serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+/// Append a scalar value to a List container. Shapes allowed match
+/// `map_set`: null / bool / number / string.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_push(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    value_json: String,
+) -> NifResult<Atom> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&value_json).map_err(json_err_to_nif)?;
+    let loro_value = json_to_loro_value(parsed)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = guard.get_list(container_id.as_str());
+    list.push(loro_value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_delete(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    len: u32,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = guard.get_list(container_id.as_str());
+    list.delete(index as usize, len as usize)
+        .map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Convert a parsed JSON value into a scalar `LoroValue`. Container-shaped
+/// values (object / array) return `:invalid_value` — use container-init
+/// APIs for nested structure. Numbers that fit in i64 are encoded as `I64`
+/// (stable integer identity); otherwise encoded as `Double`.
+fn json_to_loro_value(v: serde_json::Value) -> NifResult<LoroValue> {
+    match v {
+        serde_json::Value::Null => Ok(LoroValue::Null),
+        serde_json::Value::Bool(b) => Ok(LoroValue::Bool(b)),
+        serde_json::Value::String(s) => Ok(LoroValue::String(s.into())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(LoroValue::I64(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(LoroValue::Double(f))
+            } else {
+                Err(NifError::Term(Box::new((
+                    atoms::invalid_value(),
+                    "number out of range".to_string(),
+                ))))
+            }
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(NifError::Term(
+            Box::new((
+                atoms::invalid_value(),
+                "objects and arrays are not scalar; use list/map container init APIs".to_string(),
+            )),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-01
+
+### Added
+- `LoroEx.map_set/4`, `map_delete/3`, `map_get_json/3` — mutate a
+  root-level Map container with scalar JSON values (`null`, `bool`,
+  number, string). Objects and arrays return `{:error, {:invalid_value, _}}`
+  — nested containers need a dedicated init API (not yet exposed).
+- `LoroEx.list_push/3`, `list_delete/4`, `list_get_json/2` — same
+  scalar rules, appended onto a root-level List container.
+- New error reason atom `:invalid_value`, returned by the map/list
+  setters when the JSON value isn't a supported scalar.
+
+### Why
+Comments, presence metadata, arbitrary app-level KV now live on the
+Elixir side without the client having to round-trip Loro update bytes
+through the server. Matches the mutation surface of the text and tree
+APIs.
+
 ## [0.2.0] — 2026-04-28
 
 ### Added

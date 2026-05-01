@@ -74,6 +74,33 @@ defmodule LoroEx.Native do
   @spec get_map_json(doc(), String.t()) :: String.t() | error()
   def get_map_json(_doc, _container_id), do: :erlang.nif_error(:nif_not_loaded)
 
+  @spec map_set(doc(), String.t(), String.t(), String.t()) :: :ok | error()
+  def map_set(_doc, _container_id, _key, _value_json),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec map_delete(doc(), String.t(), String.t()) :: :ok | error()
+  def map_delete(_doc, _container_id, _key),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec map_get_json(doc(), String.t(), String.t()) :: String.t() | error()
+  def map_get_json(_doc, _container_id, _key),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # List ----------------------------------------------------------------------
+
+  @spec list_get_json(doc(), String.t()) :: String.t() | error()
+  def list_get_json(_doc, _container_id),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec list_push(doc(), String.t(), String.t()) :: :ok | error()
+  def list_push(_doc, _container_id, _value_json),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec list_delete(doc(), String.t(), non_neg_integer(), non_neg_integer()) ::
+          :ok | error()
+  def list_delete(_doc, _container_id, _index, _len),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # Movable tree --------------------------------------------------------------
 
   @spec tree_create_node(doc(), String.t(), String.t() | nil) :: String.t() | error()
