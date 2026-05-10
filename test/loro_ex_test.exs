@@ -171,14 +171,48 @@ defmodule LoroExTest do
     end
 
     @tag :nif
-    test "objects and arrays are rejected with :invalid_value" do
+    test "accepts JSON objects as frozen structured values" do
       doc = LoroEx.new()
 
-      assert {:error, {:invalid_value, _}} =
-               LoroEx.map_set(doc, "m", "k", ~s({"nested": "value"}))
+      :ok =
+        LoroEx.map_set(doc, "m", "thread", Jason.encode!(%{"author" => "alice", "body" => "hi"}))
 
-      assert {:error, {:invalid_value, _}} =
-               LoroEx.map_set(doc, "m", "k", ~s([1, 2, 3]))
+      json = LoroEx.map_get_json(doc, "m", "thread")
+      assert {:ok, %{"author" => "alice", "body" => "hi"}} = Jason.decode(json)
+    end
+
+    @tag :nif
+    test "accepts JSON arrays as frozen structured values" do
+      doc = LoroEx.new()
+
+      :ok = LoroEx.map_set(doc, "m", "tags", Jason.encode!(["one", "two", 3]))
+
+      json = LoroEx.map_get_json(doc, "m", "tags")
+      assert {:ok, ["one", "two", 3]} = Jason.decode(json)
+    end
+
+    @tag :nif
+    test "nested structured values round-trip through a snapshot" do
+      thread = %{
+        "id" => "c_123",
+        "author" => "alice",
+        "replies" => [
+          %{"id" => "r_1", "body" => "hi"},
+          %{"id" => "r_2", "body" => "hey"}
+        ],
+        "resolved" => false
+      }
+
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "comments", "c_123", Jason.encode!(thread))
+
+      snap = LoroEx.export_snapshot(doc)
+      doc2 = LoroEx.new()
+      :ok = LoroEx.apply_update(doc2, snap)
+
+      json = LoroEx.map_get_json(doc2, "comments", "c_123")
+      assert {:ok, recovered} = Jason.decode(json)
+      assert recovered == thread
     end
   end
 
@@ -202,11 +236,14 @@ defmodule LoroExTest do
     end
 
     @tag :nif
-    test "list push rejects non-scalar values" do
+    test "list push accepts structured (non-scalar) JSON values" do
       doc = LoroEx.new()
 
-      assert {:error, {:invalid_value, _}} =
-               LoroEx.list_push(doc, "events", ~s({"x": 1}))
+      :ok = LoroEx.list_push(doc, "events", Jason.encode!(%{"action" => "login"}))
+      :ok = LoroEx.list_push(doc, "events", Jason.encode!(["multi", "tag"]))
+
+      assert [%{"action" => "login"}, ["multi", "tag"]] =
+               LoroEx.list_get_json(doc, "events") |> Jason.decode!()
     end
   end
 
@@ -767,17 +804,20 @@ defmodule LoroExTest do
     end
 
     @tag :nif
-    test "text_mark rejects object/array values via :invalid_value" do
+    test "text_mark no longer rejects structured JSON mark values as :invalid_value" do
       doc = LoroEx.new()
       :ok = LoroEx.insert_text(doc, "body", 0, "hello")
 
-      # The Elixir wrapper encodes, then the NIF parses the JSON;
-      # object/array encoded JSON is rejected as :invalid_value.
-      assert {:error, {:invalid_value, _}} =
-               LoroEx.text_mark(doc, "body", 0, 5, "bold", %{"nested" => "value"})
+      # After Gap 2 (v0.6.0) parse_scalar_json is permissive: it
+      # routes objects/arrays through LoroValue::from(serde_json::Value)
+      # instead of rejecting with :invalid_value. The NIF no longer
+      # blocks structured values at the JSON layer. Loro may still
+      # reject at the CRDT layer (e.g. missing style config for a
+      # custom key) but that's orthogonal to the NIF change.
+      result = LoroEx.text_mark(doc, "body", 0, 5, "meta", %{"nested" => "value"})
 
-      assert {:error, {:invalid_value, _}} =
-               LoroEx.text_mark(doc, "body", 0, 5, "bold", [1, 2, 3])
+      refute match?({:error, {:invalid_value, _}}, result),
+             "expected parse_scalar_json to no longer reject structured values, got #{inspect(result)}"
     end
 
     @tag :nif
@@ -798,6 +838,352 @@ defmodule LoroExTest do
 
       assert {:error, {:ephemeral_apply_failed, _}} =
                LoroEx.Presence.apply(store, <<0xFF, 0xFF, 0xFF>>)
+    end
+  end
+
+  describe "map_get_child_cid/3" do
+    @tag :nif
+    test "returns the cid of a child container" do
+      doc = LoroEx.new()
+      child_cid = LoroEx.map_insert_container(doc, "root", "nested", :map)
+
+      assert LoroEx.map_get_child_cid(doc, "root", "nested") == child_cid
+    end
+
+    @tag :nif
+    test "returns nil for a scalar value" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "root", "name", ~s("hello"))
+
+      assert LoroEx.map_get_child_cid(doc, "root", "name") == nil
+    end
+
+    @tag :nif
+    test "returns nil for an absent key" do
+      doc = LoroEx.new()
+      # Touch the root container so it exists but is empty.
+      _ = LoroEx.get_map_json(doc, "root")
+
+      assert LoroEx.map_get_child_cid(doc, "root", "missing") == nil
+    end
+
+    @tag :nif
+    test "works across the container kinds (map, list, text, movable_list)" do
+      doc = LoroEx.new()
+
+      for {key, kind} <- [
+            {"a_map", :map},
+            {"a_list", :list},
+            {"a_text", :text},
+            {"a_mlist", :movable_list}
+          ] do
+        expected = LoroEx.map_insert_container(doc, "root", key, kind)
+
+        assert LoroEx.map_get_child_cid(doc, "root", key) == expected,
+               "failed for kind #{inspect(kind)}"
+      end
+    end
+
+    @tag :nif
+    test "survives snapshot roundtrip" do
+      doc = LoroEx.new()
+      orig_cid = LoroEx.map_insert_container(doc, "root", "child", :list)
+
+      snap = LoroEx.export_snapshot(doc)
+
+      doc2 = LoroEx.new()
+      :ok = LoroEx.apply_update(doc2, snap)
+
+      # Critical hydrate-safety property: cid must be recoverable
+      # after a snapshot round-trip so the Doc server can re-derive
+      # its path cache without re-creating (and thereby clobbering)
+      # the container.
+      assert LoroEx.map_get_child_cid(doc2, "root", "child") == orig_cid
+    end
+  end
+
+  describe "list_get_child_cid/3" do
+    @tag :nif
+    test "returns the cid of a child container at an index" do
+      doc = LoroEx.new()
+      child_cid = LoroEx.list_insert_container(doc, "list", 0, :map)
+
+      assert LoroEx.list_get_child_cid(doc, "list", 0) == child_cid
+    end
+
+    @tag :nif
+    test "returns nil for a scalar element" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "list", ~s("hello"))
+
+      assert LoroEx.list_get_child_cid(doc, "list", 0) == nil
+    end
+
+    @tag :nif
+    test "returns nil for an out-of-bounds index" do
+      doc = LoroEx.new()
+      # Touch the container so it exists but is empty.
+      _ = LoroEx.list_get_json(doc, "list")
+
+      assert LoroEx.list_get_child_cid(doc, "list", 0) == nil
+      assert LoroEx.list_get_child_cid(doc, "list", 999) == nil
+    end
+
+    @tag :nif
+    test "descent by path: map -> list[0] -> map -> list" do
+      doc = LoroEx.new()
+
+      children_list_cid = LoroEx.map_insert_container(doc, "root", "children", :list)
+
+      first_block_cid = LoroEx.list_insert_container(doc, children_list_cid, 0, :map)
+
+      grandchild_cid =
+        LoroEx.map_insert_container(doc, first_block_cid, "children", :list)
+
+      # Descent: root -> children -> [0] -> children
+      assert LoroEx.map_get_child_cid(doc, "root", "children") == children_list_cid
+      assert LoroEx.list_get_child_cid(doc, children_list_cid, 0) == first_block_cid
+
+      assert LoroEx.map_get_child_cid(doc, first_block_cid, "children") ==
+               grandchild_cid
+    end
+  end
+
+  describe "map_keys/2 and map_size/2" do
+    @tag :nif
+    test "empty map → zero keys, size 0" do
+      doc = LoroEx.new()
+      _ = LoroEx.get_map_json(doc, "m")
+
+      assert LoroEx.map_keys(doc, "m") == []
+      assert LoroEx.map_size(doc, "m") == 0
+    end
+
+    @tag :nif
+    test "keys and size agree with get_map_json" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "settings", "a", "1")
+      :ok = LoroEx.map_set(doc, "settings", "b", "2")
+      :ok = LoroEx.map_set(doc, "settings", "c", "3")
+
+      assert Enum.sort(LoroEx.map_keys(doc, "settings")) == ["a", "b", "c"]
+      assert LoroEx.map_size(doc, "settings") == 3
+
+      # Cross-check with the deep JSON view.
+      json_keys =
+        LoroEx.get_map_json(doc, "settings") |> Jason.decode!() |> Map.keys()
+
+      assert Enum.sort(json_keys) == ["a", "b", "c"]
+    end
+
+    @tag :nif
+    test "map_delete removes a key from the listing" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "m", "keep", "1")
+      :ok = LoroEx.map_set(doc, "m", "drop", "2")
+      :ok = LoroEx.map_delete(doc, "m", "drop")
+
+      assert LoroEx.map_keys(doc, "m") == ["keep"]
+      assert LoroEx.map_size(doc, "m") == 1
+    end
+
+    @tag :nif
+    test "nested container children count toward size and keys" do
+      doc = LoroEx.new()
+      _ = LoroEx.map_insert_container(doc, "root", "children", :list)
+      :ok = LoroEx.map_set(doc, "root", "version", "1")
+
+      assert LoroEx.map_size(doc, "root") == 2
+      assert Enum.sort(LoroEx.map_keys(doc, "root")) == ["children", "version"]
+    end
+  end
+
+  describe "list_length/2 and list_get_json_at/3" do
+    @tag :nif
+    test "empty list → length 0, get_json_at → \"null\"" do
+      doc = LoroEx.new()
+      _ = LoroEx.list_get_json(doc, "l")
+
+      assert LoroEx.list_length(doc, "l") == 0
+      assert LoroEx.list_get_json_at(doc, "l", 0) == "null"
+    end
+
+    @tag :nif
+    test "length and element reads match list_get_json" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("login"))
+      :ok = LoroEx.list_push(doc, "events", ~s("edit"))
+      :ok = LoroEx.list_push(doc, "events", "42")
+
+      assert LoroEx.list_length(doc, "events") == 3
+      assert LoroEx.list_get_json_at(doc, "events", 0) == ~s("login")
+      assert LoroEx.list_get_json_at(doc, "events", 1) == ~s("edit")
+      assert LoroEx.list_get_json_at(doc, "events", 2) == "42"
+    end
+
+    @tag :nif
+    test "out-of-bounds read returns \"null\" instead of erroring" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "l", ~s("x"))
+
+      assert LoroEx.list_get_json_at(doc, "l", 999) == "null"
+    end
+
+    @tag :nif
+    test "reads a nested container's deep value" do
+      doc = LoroEx.new()
+      child = LoroEx.list_insert_container(doc, "blocks", 0, :map)
+      :ok = LoroEx.map_set(doc, child, "title", ~s("hello"))
+
+      decoded = LoroEx.list_get_json_at(doc, "blocks", 0) |> Jason.decode!()
+      assert decoded == %{"title" => "hello"}
+    end
+  end
+
+  describe "list_insert/4" do
+    @tag :nif
+    test "inserts at a specific position, shifting the tail" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("a"))
+      :ok = LoroEx.list_push(doc, "events", ~s("c"))
+      :ok = LoroEx.list_insert(doc, "events", 1, ~s("b"))
+
+      assert ["a", "b", "c"] = LoroEx.list_get_json(doc, "events") |> Jason.decode!()
+    end
+
+    @tag :nif
+    test "inserting at length is equivalent to list_push" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "l", ~s("a"))
+      :ok = LoroEx.list_insert(doc, "l", 1, ~s("b"))
+
+      assert ["a", "b"] = LoroEx.list_get_json(doc, "l") |> Jason.decode!()
+    end
+
+    @tag :nif
+    test "inserting past length returns :out_of_bound" do
+      doc = LoroEx.new()
+      _ = LoroEx.list_get_json(doc, "l")
+
+      assert {:error, {:out_of_bound, _}} =
+               LoroEx.list_insert(doc, "l", 5, ~s("oops"))
+    end
+
+    @tag :nif
+    test "accepts structured values (same rules as list_push)" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_insert(doc, "l", 0, Jason.encode!(%{"a" => 1}))
+
+      assert [%{"a" => 1}] = LoroEx.list_get_json(doc, "l") |> Jason.decode!()
+    end
+  end
+
+  describe "map_get_or_create_container/4" do
+    @tag :nif
+    test "creates a container on first call, returns same CID on subsequent calls" do
+      doc = LoroEx.new()
+
+      first = LoroEx.map_get_or_create_container(doc, "root", "children", :list)
+      second = LoroEx.map_get_or_create_container(doc, "root", "children", :list)
+
+      assert first == second
+      assert is_binary(first)
+    end
+
+    @tag :nif
+    test "survives a snapshot hydrate (the motivating hydrate-safety case)" do
+      author = LoroEx.new()
+      orig = LoroEx.map_get_or_create_container(author, "root", "children", :list)
+
+      # Put something into the child so we can detect if it gets
+      # clobbered.
+      :ok = LoroEx.list_push(author, orig, ~s("do-not-lose"))
+
+      reader = LoroEx.new()
+      :ok = LoroEx.apply_update(reader, LoroEx.export_snapshot(author))
+
+      # On the hydrated doc we call _or_create_container again; the
+      # pre-0.6.0 workaround of "map_insert_container" would clobber
+      # the content here. This one must not.
+      recovered = LoroEx.map_get_or_create_container(reader, "root", "children", :list)
+      assert recovered == orig
+
+      assert ["do-not-lose"] =
+               LoroEx.list_get_json(reader, recovered) |> Jason.decode!()
+    end
+
+    @tag :nif
+    test "errors with :invalid_container_kind on kind mismatch" do
+      doc = LoroEx.new()
+      _ = LoroEx.map_get_or_create_container(doc, "root", "x", :list)
+
+      assert {:error, {:invalid_container_kind, _}} =
+               LoroEx.map_get_or_create_container(doc, "root", "x", :map)
+    end
+
+    @tag :nif
+    test "errors with :invalid_value when key holds a scalar" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "root", "x", ~s("scalar"))
+
+      assert {:error, {:invalid_value, _}} =
+               LoroEx.map_get_or_create_container(doc, "root", "x", :list)
+
+      # And the scalar is still there — we didn't clobber.
+      assert LoroEx.map_get_json(doc, "root", "x") == ~s("scalar")
+    end
+  end
+
+  describe "list_get_or_create_container/4" do
+    @tag :nif
+    test "append-at-end when index == length" do
+      doc = LoroEx.new()
+
+      a = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+      assert is_binary(a)
+      assert LoroEx.list_length(doc, "blocks") == 1
+
+      b = LoroEx.list_get_or_create_container(doc, "blocks", 1, :map)
+      assert b != a
+      assert LoroEx.list_length(doc, "blocks") == 2
+    end
+
+    @tag :nif
+    test "idempotent when index points at an existing same-kind container" do
+      doc = LoroEx.new()
+
+      first = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+      second = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+
+      assert first == second
+      assert LoroEx.list_length(doc, "blocks") == 1
+    end
+
+    @tag :nif
+    test "errors on kind mismatch" do
+      doc = LoroEx.new()
+      _ = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+
+      assert {:error, {:invalid_container_kind, _}} =
+               LoroEx.list_get_or_create_container(doc, "blocks", 0, :list)
+    end
+
+    @tag :nif
+    test "errors on scalar-at-index" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "l", ~s("scalar"))
+
+      assert {:error, {:invalid_value, _}} =
+               LoroEx.list_get_or_create_container(doc, "l", 0, :map)
+    end
+
+    @tag :nif
+    test "errors :out_of_bound when index > length" do
+      doc = LoroEx.new()
+      _ = LoroEx.list_get_json(doc, "l")
+
+      assert {:error, {:out_of_bound, _}} =
+               LoroEx.list_get_or_create_container(doc, "l", 5, :map)
     end
   end
 end

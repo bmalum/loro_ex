@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-05-10
+
+Both changes in this release are strictly additive — zero breaking
+changes for callers of the 0.5.x API. Inputs that previously errored
+now succeed; all previously-working calls keep their behavior.
+
+### Added
+
+- **`LoroEx.map_get_or_create_container/4`** and
+  **`LoroEx.list_get_or_create_container/4`** — idempotent,
+  race-free "ensure a child container exists" operations. The
+  check-and-insert happens under a single doc-mutex lock, so there
+  is no window where concurrent callers can both see a missing CID
+  and both insert. Directly retires the
+  `map_get_child_cid || map_insert_container` dance and the
+  hydrate-safety footgun in super_loop's
+  `Doc.Server.ensure_root_children_cid/1`. Behavior:
+  - Existing container of the same kind → return its CID unchanged.
+  - Existing container of a different kind →
+    `{:error, {:invalid_container_kind, _}}`.
+  - Scalar at the key/index → `{:error, {:invalid_value, _}}`
+    (never clobbers data).
+  - Absent → insert and return new CID.
+  - `list_get_or_create_container` additionally treats
+    `index == length` as "append at end" and
+    `index > length` as `{:error, {:out_of_bound, _}}`.
+- **`LoroEx.map_get_child_cid/3`** and **`LoroEx.list_get_child_cid/3`**
+  — return the serialized `ContainerID` of a child container, or
+  `nil` for scalar/absent/out-of-bounds cases. The return shape
+  matches `map_insert_container/4` / `list_insert_container/4`
+  (a bare CID string, no `{:ok, _}` wrapping). Enables path-based
+  descent into nested container structures (e.g.
+  `root.children[0].children`) without going through
+  `get_map_json`/`list_get_json`, which call Loro's `get_deep_value`
+  and strip container IDs. Two primary uses:
+  - **Nested block writes**: agent-facing block-edit tools can now
+    resolve a path like `[N, M, ...]` to the CID of an arbitrary
+    descendant and pass it to any map/list/text function.
+  - **Hydrate-safe path caches**: after `apply_update`, consumers that
+    keep a `path → cid` cache can re-derive it instead of
+    re-creating containers (which would clobber content).
+- **`LoroEx.map_keys/2`** and **`LoroEx.map_size/2`** — cheap map
+  introspection. O(n) and O(1) respectively at the CRDT layer,
+  avoiding the full deep-JSON-encode cost of `get_map_json/2 |>
+  Jason.decode!() |> Map.keys()` when the caller only needs keys or
+  a count.
+- **`LoroEx.list_length/2`** and **`LoroEx.list_get_json_at/3`** —
+  symmetric with `map_size/2` / `map_get_json/3`. `list_length` is
+  O(1); `list_get_json_at` returns one element as JSON (the literal
+  string `"null"` for out-of-bounds, matching `map_get_json/3`'s
+  missing-key behavior). For nested container elements returns the
+  deep value; use `list_get_child_cid/3` to recover the CID.
+- **`LoroEx.list_insert/4`** — insert a JSON value at a specific
+  position (shifts tail). Closes the API symmetry gap vs
+  `list_push/3` (end) and `list_insert_container/4` (container at
+  position). Same value rules as `list_push/3`.
+
+### Changed
+
+- **`LoroEx.map_set/4` and `LoroEx.list_push/3` now accept JSON-encoded
+  objects and arrays** as values, not just scalars. The
+  `parse_scalar_json`/`json_to_loro_value` helpers now route
+  structured values through Loro's built-in
+  `LoroValue::from(serde_json::Value)` impl, producing
+  `LoroValue::Map` and `LoroValue::List` variants. The helpers keep
+  their names for source-compat; their `@doc` strings are updated.
+  Structured values are stored as **frozen** values inside the parent
+  — for CRDT-level merging on nested fields, use
+  `map_insert_container/4` / `list_insert_container/4` to materialize
+  a nested container instead. The same relaxation applies to
+  `text_mark/6` (which also goes through `parse_scalar_json`), so
+  structured mark values (e.g. complex attribute objects) now
+  round-trip through `text_to_delta/2`.
+- **Tests reflecting the old scalar-only behavior were updated**:
+  the `map mutation`, `list mutation`, and `bad inputs to new NIFs`
+  describes previously asserted `{:error, {:invalid_value, _}}` for
+  objects/arrays. They now verify successful round-trips.
+
 ## [0.5.2] — 2026-05-01
 
 ### Changed

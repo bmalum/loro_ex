@@ -86,13 +86,28 @@ defmodule LoroEx.Native do
   def map_delete(_doc, _cid, _key), do: :erlang.nif_error(:nif_not_loaded)
   def map_get_json(_doc, _cid, _key), do: :erlang.nif_error(:nif_not_loaded)
   def map_insert_container(_doc, _cid, _key, _kind), do: :erlang.nif_error(:nif_not_loaded)
+  def map_get_child_cid(_doc, _cid, _key), do: :erlang.nif_error(:nif_not_loaded)
+
+  def map_get_or_create_container(_doc, _cid, _key, _kind),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def map_keys(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+  def map_size(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
 
   # List ----------------------------------------------------------------------
 
   def list_get_json(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
   def list_push(_doc, _cid, _value_json), do: :erlang.nif_error(:nif_not_loaded)
+  def list_insert(_doc, _cid, _pos, _value_json), do: :erlang.nif_error(:nif_not_loaded)
   def list_delete(_doc, _cid, _index, _len), do: :erlang.nif_error(:nif_not_loaded)
   def list_insert_container(_doc, _cid, _pos, _kind), do: :erlang.nif_error(:nif_not_loaded)
+  def list_get_child_cid(_doc, _cid, _index), do: :erlang.nif_error(:nif_not_loaded)
+
+  def list_get_or_create_container(_doc, _cid, _index, _kind),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def list_length(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+  def list_get_json_at(_doc, _cid, _index), do: :erlang.nif_error(:nif_not_loaded)
 
   # Movable tree --------------------------------------------------------------
 

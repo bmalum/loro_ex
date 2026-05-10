@@ -868,16 +868,65 @@ defmodule LoroEx do
   defdelegate get_map_json(doc, container_id), to: Native
 
   @doc """
-  Set `key` on a map container to the JSON-encoded scalar `value_json`.
+  Return the list of keys currently present in a map container, in
+  an unspecified order.
 
-  Only scalars are supported directly: `null`, `true`/`false`, numbers,
-  strings. Objects and arrays return `{:error, {:invalid_value, _}}` —
-  for nested structure use `map_insert_container/4`.
+  O(n) in the map size at the CRDT layer — much cheaper than
+  `get_map_json/2 |> Jason.decode!() |> Map.keys()` when you only
+  need the keys (e.g. iterating a comment-thread map).
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "comments", "c1", ~s("…"))
+      :ok = LoroEx.map_set(doc, "comments", "c2", ~s("…"))
+
+      LoroEx.map_keys(doc, "comments") |> Enum.sort()
+      # => ["c1", "c2"]
+  """
+  @spec map_keys(doc(), container_id()) :: [String.t()] | error()
+  defdelegate map_keys(doc, container_id), to: Native
+
+  @doc """
+  Return the number of entries in a map container.
+
+  O(1) at the CRDT layer. Prefer this over
+  `map_keys(doc, cid) |> length()` or
+  `get_map_json(doc, cid) |> Jason.decode!() |> map_size()`.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "settings", "a", "1")
+      :ok = LoroEx.map_set(doc, "settings", "b", "2")
+
+      LoroEx.map_size(doc, "settings")
+      # => 2
+  """
+  @spec map_size(doc(), container_id()) :: non_neg_integer() | error()
+  defdelegate map_size(doc, container_id), to: Native
+
+  @doc """
+  Set `key` on a map container to the JSON-encoded `value_json`.
+
+  Accepts any valid JSON value: scalars (`null`, `true`/`false`,
+  numbers, strings) **and** objects and arrays.
 
   The "value is a JSON string" is deliberate — it keeps the type
   boundary explicit. An Elixir number becomes `"42"`, a string becomes
   `~s("dark")` (the outer `~s(...)` quotes the JSON, the inner escaped
-  quotes delimit the JSON string value).
+  quotes delimit the JSON string value). Structured values should be
+  produced with `Jason.encode!/1`.
+
+  ## Structured vs container values
+
+  Structured JSON values (objects / arrays) passed here are stored as
+  **frozen** structured values inside the parent map — the whole tree
+  is one logical value and concurrent edits LWW at the parent key. If
+  you need CRDT-level merging on nested fields (e.g. two peers
+  concurrently editing different keys inside the same sub-object),
+  use `map_insert_container/4` to materialize a nested container
+  instead.
 
   ## Examples
 
@@ -895,13 +944,14 @@ defmodule LoroEx do
       # null
       :ok = LoroEx.map_set(doc, "settings", "last_opened", "null")
 
-  ## Errors
-
-    * `{:error, {:invalid_value, _}}` — `value_json` is an object or array
+      # Structured value (frozen — no per-field CRDT merging)
+      :ok = LoroEx.map_set(doc, "settings", "layout",
+              Jason.encode!(%{"columns" => 2, "sidebar" => true}))
 
   ## See also
 
-    * `map_insert_container/4` — nest a text/map/list/movable_list under a key
+    * `map_insert_container/4` — nest a text/map/list/movable_list
+      under a key (use this when you want CRDT merging on nested fields)
   """
   @spec map_set(doc(), container_id(), String.t(), String.t()) :: :ok | error()
   defdelegate map_set(doc, container_id, key, value_json), to: Native
@@ -983,6 +1033,94 @@ defmodule LoroEx do
           container_id() | error()
   defdelegate map_insert_container(doc, container_id, key, kind), to: Native
 
+  @doc """
+  Idempotent, race-free "ensure a child container exists under
+  `key`". If `key` already holds a container of the requested
+  `kind`, returns its existing CID. Otherwise inserts a new empty
+  container and returns its CID.
+
+  The check-and-insert happens under a single doc-mutex lock, so
+  there's no window for two callers to race and both insert —
+  replaces the non-atomic dance:
+
+      cid = LoroEx.map_get_child_cid(doc, parent, key) ||
+              LoroEx.map_insert_container(doc, parent, key, :map)
+
+  ## Behavior
+
+    * `key` absent → insert new container, return its CID
+    * `key` holds a container of `kind` → return its CID unchanged
+    * `key` holds a container of a **different** kind →
+      `{:error, {:invalid_container_kind, _}}`
+    * `key` holds a scalar →
+      `{:error, {:invalid_value, _}}` (never clobbers data)
+
+  ## Example — hydrate-safe root children
+
+      doc = LoroEx.new()
+      :ok = LoroEx.apply_update(doc, some_snapshot)
+
+      # Safe whether or not this is the first time we've seen the
+      # doc: existing CID is returned, or a new one is created.
+      children_cid = LoroEx.map_get_or_create_container(doc, "root", "children", :list)
+  """
+  @spec map_get_or_create_container(
+          doc(),
+          container_id(),
+          String.t(),
+          container_kind()
+        ) :: container_id() | error()
+  defdelegate map_get_or_create_container(doc, container_id, key, kind), to: Native
+
+  @doc """
+  Return the serialized ContainerID of the child container stored
+  under `key`, or `nil` if the value at that key is a scalar, the key
+  is absent, or the map itself is detached.
+
+  Use this to resolve a path through nested containers without going
+  through `get_map_json/2` — the deep-value JSON strips container IDs
+  and can't be used to address nested containers for subsequent
+  writes.
+
+  ## Why not just use `get_map_json/2`?
+
+  `get_map_json/2` calls Loro's `get_deep_value` which inlines nested
+  containers as plain JSON. The returned value tells you *what's*
+  inside but not *where* — you can't use it to address those nested
+  containers for subsequent writes. `map_get_child_cid/3` returns the
+  same serialized CID you got from `map_insert_container/4`, so you
+  can pass it to any map/list/text function.
+
+  ## Returns
+
+    * `cid :: String.t()` — `key` holds a container (map / list /
+      text / movable_list / tree); `cid` is a serialized ContainerID
+    * `nil` — `key` holds a scalar, is absent, or the map is detached
+
+  Matches the return shape of `map_insert_container/4`, which also
+  returns a bare CID string.
+
+  ## Example — hydrate-safe descent
+
+      doc = LoroEx.new()
+      :ok = LoroEx.apply_update(doc, LoroEx.export_snapshot(previously_populated_doc))
+
+      # After hydration the "children" list container has a different
+      # handle identity than the original. Rediscover it:
+      list_cid = LoroEx.map_get_child_cid(doc, "root", "children")
+      first_block = LoroEx.list_get_child_cid(doc, list_cid, 0)
+
+      :ok = LoroEx.map_set(doc, first_block, "title", ~s("Updated"))
+
+  ## See also
+
+    * `list_get_child_cid/3` — same thing for list elements
+    * `map_insert_container/4` — creates child containers
+  """
+  @spec map_get_child_cid(doc(), container_id(), String.t()) ::
+          container_id() | nil | error()
+  defdelegate map_get_child_cid(doc, container_id, key), to: Native
+
   # ============================================================================
   # List
   # ============================================================================
@@ -1006,10 +1144,52 @@ defmodule LoroEx do
   defdelegate list_get_json(doc, container_id), to: Native
 
   @doc """
-  Append a JSON scalar to a list container.
+  Return the number of elements in a list container.
 
-  Same scalar-only rules as `map_set/4`. Use
-  `list_insert_container/4` for nested structure.
+  O(1) at the CRDT layer.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("a"))
+      :ok = LoroEx.list_push(doc, "events", ~s("b"))
+
+      LoroEx.list_length(doc, "events")
+      # => 2
+  """
+  @spec list_length(doc(), container_id()) :: non_neg_integer() | error()
+  defdelegate list_length(doc, container_id), to: Native
+
+  @doc """
+  Return the value at `list[index]` as a JSON string. Symmetric with
+  `map_get_json/3`.
+
+  Returns the literal string `"null"` if the index is out of bounds.
+  For elements that are nested containers, returns the deep value of
+  the sub-tree (same shape as `list_get_json/2`); use
+  `list_get_child_cid/3` to recover the CID for further writes.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("login"))
+
+      LoroEx.list_get_json_at(doc, "events", 0)
+      # => "\\"login\\""
+
+      LoroEx.list_get_json_at(doc, "events", 999)
+      # => "null"
+  """
+  @spec list_get_json_at(doc(), container_id(), non_neg_integer()) :: String.t() | error()
+  defdelegate list_get_json_at(doc, container_id, index), to: Native
+
+  @doc """
+  Append a JSON value to a list container.
+
+  Accepts any valid JSON value: scalars (`null`, `true`/`false`,
+  numbers, strings) **and** objects and arrays. Structured values are
+  stored as frozen structured values — for CRDT-level merging on
+  nested fields, use `list_insert_container/4` instead.
 
   ## Examples
 
@@ -1018,12 +1198,35 @@ defmodule LoroEx do
       :ok = LoroEx.list_push(doc, "counters", "42")
       :ok = LoroEx.list_push(doc, "flags", "true")
 
-  ## Errors
-
-    * `{:error, {:invalid_value, _}}` — object or array, not a scalar
+      # Structured (frozen) value
+      :ok = LoroEx.list_push(doc, "history",
+              Jason.encode!(%{"action" => "edit", "at" => 1_700_000_000}))
   """
   @spec list_push(doc(), container_id(), String.t()) :: :ok | error()
   defdelegate list_push(doc, container_id, value_json), to: Native
+
+  @doc """
+  Insert a JSON value at `pos` in a list container (shifts tail).
+  Same value rules as `list_push/3` (scalars, objects, arrays are
+  all accepted). For nested containers, use
+  `list_insert_container/4`.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("a"))
+      :ok = LoroEx.list_push(doc, "events", ~s("c"))
+      :ok = LoroEx.list_insert(doc, "events", 1, ~s("b"))
+
+      LoroEx.list_get_json(doc, "events") |> Jason.decode!()
+      # => ["a", "b", "c"]
+
+  ## Errors
+
+    * `{:error, {:out_of_bound, _}}` — `pos` > current length
+  """
+  @spec list_insert(doc(), container_id(), non_neg_integer(), String.t()) :: :ok | error()
+  defdelegate list_insert(doc, container_id, pos, value_json), to: Native
 
   @doc """
   Delete `len` elements starting at `index` from a list container.
@@ -1071,6 +1274,79 @@ defmodule LoroEx do
           container_kind()
         ) :: container_id() | error()
   defdelegate list_insert_container(doc, container_id, pos, kind), to: Native
+
+  @doc """
+  Idempotent, race-free "ensure a child container" for lists.
+  Sibling of `map_get_or_create_container/4`.
+
+  Lists don't have stable keys across insertions, so this operation
+  is less natural than the map variant — use it when you know the
+  intended shape. The usual case is idempotent creation of a
+  block-at-position-0 during hydration.
+
+  ## Behavior
+
+    * `index < length` and `list[index]` is a container of `kind` →
+      return its CID unchanged
+    * `index < length` and `list[index]` is a container of a
+      different kind → `{:error, {:invalid_container_kind, _}}`
+    * `index < length` and `list[index]` is a scalar →
+      `{:error, {:invalid_value, _}}` (never clobbers)
+    * `index == length` → insert a new container **at the end** and
+      return its CID (append-if-missing)
+    * `index > length` → `{:error, {:out_of_bound, _}}`
+
+  ## Example
+
+      doc = LoroEx.new()
+      # First call: list is empty, index 0 == len 0 → append
+      a = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+      # Second call: index 0 holds a :map container → idempotent
+      ^a = LoroEx.list_get_or_create_container(doc, "blocks", 0, :map)
+  """
+  @spec list_get_or_create_container(
+          doc(),
+          container_id(),
+          non_neg_integer(),
+          container_kind()
+        ) :: container_id() | error()
+  defdelegate list_get_or_create_container(doc, container_id, index, kind), to: Native
+
+  @doc """
+  Return the serialized ContainerID of the child container at
+  `index`, or `nil` if the element at that index is a scalar, the
+  index is out of bounds, or the list is detached.
+
+  The list symmetric of `map_get_child_cid/3`. Use this to resolve a
+  path through nested containers — e.g. `root.children[0].children`
+  — without going through `list_get_json/2`, which strips container
+  IDs.
+
+  ## Returns
+
+    * `cid :: String.t()` — `list[index]` holds a container
+    * `nil` — scalar element, out-of-bounds, or detached
+
+  Matches the return shape of `list_insert_container/4`.
+
+  ## Example — descent by path
+
+      doc = LoroEx.new()
+      children_list = LoroEx.map_insert_container(doc, "root", "children", :list)
+      first_block = LoroEx.list_insert_container(doc, children_list, 0, :map)
+
+      # After a snapshot round-trip, re-derive the path:
+      ^children_list = LoroEx.map_get_child_cid(doc, "root", "children")
+      ^first_block = LoroEx.list_get_child_cid(doc, children_list, 0)
+
+  ## See also
+
+    * `map_get_child_cid/3`
+    * `list_insert_container/4`
+  """
+  @spec list_get_child_cid(doc(), container_id(), non_neg_integer()) ::
+          container_id() | nil | error()
+  defdelegate list_get_child_cid(doc, container_id, index), to: Native
 
   # ============================================================================
   # Tree (movable)

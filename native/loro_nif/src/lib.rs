@@ -31,7 +31,8 @@ use loro::{
     awareness::EphemeralStore,
     cursor::{Cursor, PosType, Side},
     ContainerID, ContainerType, ExportMode, Frontiers, LoroDoc, LoroEncodeError, LoroError,
-    LoroTreeError, LoroValue, Subscription, TextDelta, TreeID, UndoManager, VersionVector,
+    LoroTreeError, LoroValue, Subscription, TextDelta, TreeID, UndoManager, ValueOrContainer,
+    VersionVector,
 };
 
 mod atoms {
@@ -251,9 +252,18 @@ fn json_to_loro_value(v: serde_json::Value) -> NifResult<LoroValue> {
                 Err(invalid_value_err("number out of range"))
             }
         }
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(invalid_value_err(
-            "objects and arrays are not scalar; use container init APIs",
-        )),
+        // Structured values: defer to Loro's built-in conversion, which
+        // walks the tree and produces LoroValue::List / LoroValue::Map
+        // with the same semantics as the scalar branches above. Available
+        // because the `loro` crate enables the `serde_json` feature on
+        // `loro-common`.
+        //
+        // Note: values produced this way are stored as frozen structured
+        // values inside the parent map/list. For CRDT-level merging on
+        // nested fields, use `map_insert_container` / `list_insert_container`
+        // to materialize nested containers instead.
+        arr @ serde_json::Value::Array(_) => Ok(LoroValue::from(arr)),
+        obj @ serde_json::Value::Object(_) => Ok(LoroValue::from(obj)),
     }
 }
 
@@ -648,6 +658,26 @@ fn get_map_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResul
     serde_json::to_string(&value).map_err(json_err_to_nif)
 }
 
+/// Return the list of keys currently present in a map container.
+/// O(n) in the map size but avoids the full deep-JSON-encode cost of
+/// `get_map_json/2` when the caller only needs to iterate keys.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_keys(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<Vec<String>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = get_map_handle(&guard, &container_id);
+    Ok(map.keys().map(|s| s.as_ref().to_string()).collect())
+}
+
+/// Return the number of entries in a map container. O(1) at the
+/// CRDT layer — much cheaper than decoding `get_map_json/2` just to
+/// count keys.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_size(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u32> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = get_map_handle(&guard, &container_id);
+    Ok(map.len() as u32)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn map_set(
     doc: ResourceArc<DocResource>,
@@ -731,6 +761,125 @@ fn map_insert_container(
     Ok(cid_str)
 }
 
+/// Idempotent, race-free "ensure a child container exists at this
+/// key" for maps.
+///
+/// Semantics:
+/// * If `map[key]` already holds a container of the requested kind,
+///   return its CID unchanged.
+/// * If `map[key]` holds a container of a **different** kind, return
+///   `{:invalid_container_kind, _}` — we never silently coerce a
+///   container's kind.
+/// * If `map[key]` holds a scalar value, return `{:invalid_value, _}`
+///   — we never clobber existing data.
+/// * If `map[key]` is absent, insert a new container of the
+///   requested kind and return its CID.
+///
+/// The check-then-insert happens under a single lock of the doc's
+/// mutex so there's no window where two callers can race and both
+/// insert. Replaces the non-atomic dance
+/// `map_get_child_cid || map_insert_container`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_get_or_create_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::{Container, ContainerTrait};
+
+    let requested = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = get_map_handle(&guard, &container_id);
+
+    // Existing entry at `key`?
+    if let Some(existing) = map.get(&key) {
+        match existing {
+            ValueOrContainer::Container(c) => {
+                let actual = match &c {
+                    Container::Text(_) => ContainerType::Text,
+                    Container::Map(_) => ContainerType::Map,
+                    Container::List(_) => ContainerType::List,
+                    Container::MovableList(_) => ContainerType::MovableList,
+                    Container::Tree(_) => ContainerType::Tree,
+                    _ => {
+                        return Err(invalid_value_err(
+                            "existing child has an unsupported container kind",
+                        ));
+                    }
+                };
+                if actual != requested {
+                    return Err(NifError::Term(Box::new((
+                        atoms::invalid_container_kind(),
+                        format!(
+                            "key {:?} already holds a {:?} container, requested {:?}",
+                            key, actual, requested
+                        ),
+                    ))));
+                }
+                return Ok(c.id().to_string());
+            }
+            ValueOrContainer::Value(_) => {
+                return Err(invalid_value_err(
+                    "key already holds a scalar value; refusing to clobber",
+                ));
+            }
+        }
+    }
+
+    // Absent → insert a new container.
+    let cid_str = match requested {
+        ContainerType::Text => map
+            .insert_container(&key, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => map
+            .insert_container(&key, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => map
+            .insert_container(&key, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => map
+            .insert_container(&key, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
+}
+
+/// Return the child container's ID for `map[key]`, or `None` if the
+/// value at that key is a scalar, absent, or the map itself is
+/// detached. Enables path-based descent into nested container
+/// structures without going through `get_deep_value`, which strips
+/// container IDs.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn map_get_child_cid(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    key: String,
+) -> NifResult<Option<String>> {
+    use loro::ContainerTrait;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let map = get_map_handle(&guard, &container_id);
+
+    Ok(match map.get(&key) {
+        Some(ValueOrContainer::Container(c)) => Some(c.id().to_string()),
+        _ => None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // List
 // ---------------------------------------------------------------------------
@@ -740,6 +889,37 @@ fn list_get_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResu
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let value = get_list_handle(&guard, &container_id).get_deep_value();
     serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+/// Return the number of elements in a list container. O(1) at the
+/// CRDT layer — much cheaper than decoding `list_get_json/2` just to
+/// count.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_length(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u32> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    Ok(list.len() as u32)
+}
+
+/// Return the value at `list[index]` as a JSON string. Returns the
+/// literal `"null"` if the index is out of bounds, matching
+/// `map_get_json/3`'s missing-key behavior.
+///
+/// For container children, returns the deep value (same shape as
+/// `list_get_json/2` for the sub-tree). Use `list_get_child_cid/3`
+/// to recover the CID for further writes.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_get_json_at(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    match list.get(index as usize) {
+        Some(v) => serde_json::to_string(&v.get_deep_value()).map_err(json_err_to_nif),
+        None => Ok("null".to_string()),
+    }
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -752,6 +932,27 @@ fn list_push(
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let list = get_list_handle(&guard, &container_id);
     list.push(loro_value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Insert a JSON value at `pos` in a list container (shifts tail).
+/// Accepts the same values as `list_push` (scalars + objects +
+/// arrays). For nested containers, use `list_insert_container/4`.
+///
+/// Errors with `:out_of_bound` if `pos > list.len()`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_insert(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    value_json: String,
+) -> NifResult<Atom> {
+    let loro_value = parse_scalar_json(&value_json)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    list.insert(pos as usize, loro_value)
+        .map_err(loro_err_to_nif)?;
     guard.commit();
     Ok(atoms::ok())
 }
@@ -812,6 +1013,140 @@ fn list_insert_container(
     };
     guard.commit();
     Ok(cid_str)
+}
+
+/// Idempotent, race-free "ensure a child container" for lists.
+///
+/// Semantics:
+/// * If `index < list.len()` and `list[index]` is a container of the
+///   requested kind → return its CID unchanged.
+/// * If `index < list.len()` and `list[index]` is a container of a
+///   different kind → `{:invalid_container_kind, _}`.
+/// * If `index < list.len()` and `list[index]` is a scalar value →
+///   `{:invalid_value, _}` — we never clobber existing data.
+/// * If `index == list.len()` → insert a new container of the
+///   requested kind **at the end** and return its CID.
+///   (This is the natural "append if missing" case for appending
+///   blocks to a child list.)
+/// * If `index > list.len()` → `{:out_of_bound, _}`.
+///
+/// The check-then-insert happens under a single doc-mutex lock.
+/// Replaces the non-atomic dance
+/// `list_get_child_cid || list_insert_container`.
+///
+/// Note: lists don't have stable keys across insertions, so this
+/// operation is less "natural" than the map variant. Use it when you
+/// know the intended shape — typically for idempotent creation of
+/// block-at-position-0 during hydration.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_get_or_create_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::{Container, ContainerTrait};
+
+    let requested = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+    let idx = index as usize;
+    let len = list.len();
+
+    if idx < len {
+        match list.get(idx) {
+            Some(ValueOrContainer::Container(c)) => {
+                let actual = match &c {
+                    Container::Text(_) => ContainerType::Text,
+                    Container::Map(_) => ContainerType::Map,
+                    Container::List(_) => ContainerType::List,
+                    Container::MovableList(_) => ContainerType::MovableList,
+                    Container::Tree(_) => ContainerType::Tree,
+                    _ => {
+                        return Err(invalid_value_err(
+                            "existing child has an unsupported container kind",
+                        ));
+                    }
+                };
+                if actual != requested {
+                    return Err(NifError::Term(Box::new((
+                        atoms::invalid_container_kind(),
+                        format!(
+                            "index {} already holds a {:?} container, requested {:?}",
+                            idx, actual, requested
+                        ),
+                    ))));
+                }
+                return Ok(c.id().to_string());
+            }
+            Some(ValueOrContainer::Value(_)) => {
+                return Err(invalid_value_err(
+                    "index already holds a scalar value; refusing to clobber",
+                ));
+            }
+            None => {
+                // Should be unreachable given idx < len, but fall through
+                // to the append-at-end branch defensively.
+            }
+        }
+    } else if idx > len {
+        return Err(NifError::Term(Box::new((
+            atoms::out_of_bound(),
+            format!("index {} > len {}", idx, len),
+        ))));
+    }
+
+    // idx == len → insert a new container at the end.
+    let cid_str = match requested {
+        ContainerType::Text => list
+            .insert_container(len, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => list
+            .insert_container(len, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => list
+            .insert_container(len, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => list
+            .insert_container(len, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
+}
+
+/// Return the child container's ID for `list[index]`, or `None` if the
+/// value at that index is a scalar or the index is out of bounds.
+/// Bounds are not treated as an error — callers that want to
+/// distinguish "missing" from "scalar present" can cross-check against
+/// `list_get_json`'s length.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn list_get_child_cid(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+) -> NifResult<Option<String>> {
+    use loro::ContainerTrait;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_list_handle(&guard, &container_id);
+
+    Ok(match list.get(index as usize) {
+        Some(ValueOrContainer::Container(c)) => Some(c.id().to_string()),
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------------------
