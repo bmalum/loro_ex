@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-12
+
+### Added
+
+- **`LoroEx.fork/1`** — return an independent clone of a document.
+  The clone observes the parent's full op history at the moment of
+  the call but lives in a separate Rust resource; mutations and
+  exports on the fork do not affect the parent, and vice versa. Loro
+  assigns the clone a new random peer id. O(n) in op-log size but
+  considerably cheaper than `export_snapshot/1` because no
+  serialization to bytes happens. Primary use case: move an
+  expensive `export_snapshot/1` or `export_shallow_snapshot/2` call
+  off a doc-owning GenServer's mailbox by forking synchronously
+  (fast) and exporting the fork inside a `Task`.
+
 ## [0.6.0] — 2026-05-10
 
 Both changes in this release are strictly additive — zero breaking

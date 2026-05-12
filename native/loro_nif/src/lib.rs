@@ -350,6 +350,25 @@ fn new_doc_with_peer(peer_id: u64) -> NifResult<ResourceArc<DocResource>> {
     Ok(ResourceArc::new(DocResource::new(doc)))
 }
 
+/// Duplicate the document. The returned `LoroDoc` observes the parent's op
+/// history at the moment of the call but lives in its own resource — mutations
+/// and exports on the fork do not touch the parent, and vice versa.
+///
+/// Loro assigns the fork a new random peer id, so any ops committed on it
+/// won't collide with the parent's peer id if they're later merged back.
+///
+/// Time and space complexity are O(n) in the size of the op log — it's not
+/// free, but it's considerably cheaper than a full `export_snapshot` because
+/// no serialization to bytes happens. Primarily useful for moving expensive
+/// exports off a GenServer mailbox.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn fork(doc: ResourceArc<DocResource>) -> NifResult<ResourceArc<DocResource>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let forked = guard.fork();
+    drop(guard);
+    Ok(ResourceArc::new(DocResource::new(forked)))
+}
+
 // ---------------------------------------------------------------------------
 // Sync primitives
 // ---------------------------------------------------------------------------

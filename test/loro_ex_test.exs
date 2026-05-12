@@ -1186,4 +1186,79 @@ defmodule LoroExTest do
                LoroEx.list_get_or_create_container(doc, "l", 5, :map)
     end
   end
+
+  describe "fork" do
+    @tag :nif
+    test "fork/1 returns an independent doc that shares history" do
+      parent = LoroEx.new()
+      :ok = LoroEx.insert_text(parent, "body", 0, "hello")
+
+      child = LoroEx.fork(parent)
+
+      # Both see the fork-point content.
+      assert LoroEx.get_text(child, "body") == "hello"
+
+      # Mutating the child does NOT affect the parent.
+      :ok = LoroEx.insert_text(child, "body", 5, " world")
+      assert LoroEx.get_text(parent, "body") == "hello"
+      assert LoroEx.get_text(child, "body") == "hello world"
+
+      # Mutating the parent does NOT affect the child.
+      :ok = LoroEx.insert_text(parent, "body", 5, "!")
+      assert LoroEx.get_text(parent, "body") == "hello!"
+      assert LoroEx.get_text(child, "body") == "hello world"
+
+      # A mirror seeded from the parent snapshot reflects only the
+      # parent's ops, not the child's.
+      parent_snap = LoroEx.export_snapshot(parent)
+      mirror = LoroEx.new()
+      :ok = LoroEx.apply_update(mirror, parent_snap)
+      assert LoroEx.get_text(mirror, "body") == "hello!"
+    end
+
+    @tag :nif
+    test "fork/1 can be exported concurrently with parent mutations" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "A")
+
+      forked = LoroEx.fork(doc)
+
+      task =
+        Task.async(fn ->
+          LoroEx.export_snapshot(forked)
+        end)
+
+      # Parent continues to take writes during the fork's export.
+      for _ <- 1..50, do: :ok = LoroEx.insert_text(doc, "body", 0, "x")
+
+      snap = Task.await(task)
+      mirror = LoroEx.new()
+      :ok = LoroEx.apply_update(mirror, snap)
+
+      # The fork's snapshot reflects the fork point, not the parent's
+      # current state.
+      assert LoroEx.get_text(mirror, "body") == "A"
+      # Parent has moved on.
+      assert LoroEx.get_text(doc, "body") == String.duplicate("x", 50) <> "A"
+    end
+
+    @tag :nif
+    test "fork/1 preserves tree state" do
+      parent = LoroEx.new()
+      node_id = LoroEx.tree_create_node(parent, "blocks", nil)
+      _child_id = LoroEx.tree_create_node(parent, "blocks", node_id)
+
+      fork = LoroEx.fork(parent)
+
+      # Both trees look the same at the fork point.
+      assert LoroEx.tree_get_nodes(fork, "blocks") ==
+               LoroEx.tree_get_nodes(parent, "blocks")
+
+      # Creating a new node on the fork does not appear on the parent.
+      _ = LoroEx.tree_create_node(fork, "blocks", nil)
+
+      refute LoroEx.tree_get_nodes(fork, "blocks") ==
+               LoroEx.tree_get_nodes(parent, "blocks")
+    end
+  end
 end

@@ -40,6 +40,7 @@ defmodule LoroEx.Native do
 
   def new_doc, do: :erlang.nif_error(:nif_not_loaded)
   def new_doc_with_peer(_peer_id), do: :erlang.nif_error(:nif_not_loaded)
+  def fork(_doc), do: :erlang.nif_error(:nif_not_loaded)
 
   # Sync primitives -----------------------------------------------------------
 

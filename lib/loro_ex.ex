@@ -199,6 +199,52 @@ defmodule LoroEx do
   @spec new(non_neg_integer()) :: doc() | error()
   defdelegate new(peer_id), to: Native, as: :new_doc_with_peer
 
+  @doc """
+  Return an independent clone of the document.
+
+  The clone observes the parent's full op history at the moment of the
+  call, but its state lives in a separate Rust resource: mutations and
+  exports on the fork do not affect the parent, and vice versa. Loro
+  assigns the clone a new random peer id.
+
+  ## Use cases
+
+  Primary use case is moving an expensive `export_snapshot/1` or
+  `export_shallow_snapshot/2` call off a doc-owning GenServer's mailbox:
+
+      forked = LoroEx.fork(state.doc)
+
+      Task.Supervisor.async_nolink(MySup, fn ->
+        LoroEx.export_snapshot(forked)
+      end)
+
+  The GenServer continues serving `apply_update/2` calls while the
+  forked doc is serialized in the task. The fork is garbage collected
+  automatically when the Elixir term goes out of scope — its Rust
+  destructor releases the cloned state without touching the parent.
+
+  ## Cost
+
+  O(n) in the size of the op log. Not free, but cheaper than a full
+  snapshot export because no serialization to bytes happens. For a
+  400-block doc the fork itself is typically sub-millisecond.
+
+  ## Example
+
+      parent = LoroEx.new()
+      :ok    = LoroEx.insert_text(parent, "body", 0, "shared")
+
+      child = LoroEx.fork(parent)
+      :ok   = LoroEx.insert_text(child, "body", 6, " + extra")
+
+      LoroEx.get_text(parent, "body")
+      # => "shared"
+      LoroEx.get_text(child, "body")
+      # => "shared + extra"
+  """
+  @spec fork(doc()) :: doc() | error()
+  defdelegate fork(doc), to: Native
+
   # ============================================================================
   # Sync primitives
   # ============================================================================
