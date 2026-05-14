@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-05-14
+
+The biggest single release since 0.5.0. Closes the largest functional gaps
+in the binding: `MovableList` is now wrappable end-to-end (it was 0%
+covered before), the tree container exposes proper structural queries
+instead of forcing a full JSON decode, and the projection-pipeline
+integration that prompted the release ships as `containers_touched_since/2`.
+
+Public NIF surface goes from **73 → 115 functions** (≈24% → ≈45% of the
+Loro 1.12 facade). Strictly additive — zero breaking changes for callers
+of 0.7.x.
+
+### Added — projection pipeline
+
+- **`LoroEx.containers_touched_since/2`** — list the distinct
+  `ContainerID` strings that received at least one op between a stored
+  version vector and the doc's current state. The Layer-1 pre-filter
+  for projection / cache rebuilders: cost is O(ops_since), not
+  O(doc_size). For a single paragraph edit on a 500-block doc, this
+  typically returns 1–3 CIDs in microseconds. Implementation goes
+  through `export_json_updates_without_peer_compression` (the
+  compressed variant rewrites peer ids in CID strings, which would
+  break round-tripping).
+
+### Added — `MovableList` full surface
+
+Previously the `:movable_list` kind could be named as a child container
+but the resulting handle was inert. 18 new NIFs cover the full
+operational surface:
+
+- **Mirror of `list_*`**: `movable_list_get_json/2`,
+  `movable_list_length/2`, `movable_list_get_json_at/3`,
+  `movable_list_push/3`, `movable_list_insert/4`,
+  `movable_list_delete/4`, `movable_list_insert_container/4`,
+  `movable_list_get_child_cid/3`,
+  `movable_list_get_or_create_container/4`,
+  `movable_list_get_cursor/4`.
+- **`MovableList`-only**: `movable_list_set/4` (set-by-index),
+  **`movable_list_move/4`** (the headline feature — preserves identity
+  across moves so concurrent moves of the same element converge),
+  `movable_list_pop/2`, `movable_list_clear/2`,
+  `movable_list_set_container/4`, `movable_list_get_creator_at/3`,
+  `movable_list_get_last_mover_at/3`,
+  `movable_list_get_last_editor_at/3`.
+
+A regression test exercises convergence: Alice moves index 0→2, Bob
+concurrently moves index 2→0; after sync both peers see the same
+list.
+
+### Added — Tree structural queries
+
+8 new query NIFs so consumers walking a tree don't have to decode
+`tree_get_nodes/2`'s full JSON dump for every structural question:
+
+- `tree_parent/3` — projected as `{:ok, parent_id}` | `:root` |
+  `:deleted` | `:unexist`.
+- `tree_children/3`, `tree_children_num/3`, `tree_roots/2`.
+- `tree_contains/3` — answers _"has this id existed in this tree"_,
+  not _"is currently live"_; pair with the next entry to disambiguate.
+- `tree_is_node_deleted/3` — confirms cascade-on-parent-delete.
+- `tree_fractional_index/3` — for stable relative ordering.
+- `tree_get_value_with_meta/2` — JSON tree with each node's meta map
+  inlined.
+
+### Added — `revert_to/2`
+
+- **`LoroEx.revert_to/2`** — rewind the doc to a previous frontier by
+  emitting **new ops** that invert the changes since that point. NOT
+  a checkout: the inverse ops sync to peers like any other edit, fire
+  subscription callbacks, and integrate with `UndoManager`. The
+  forward-compatible-undo distinction is documented prominently in
+  the `@doc` because it is unintuitive.
+
+### Added — `LoroDoc` admin & introspection (Tier A)
+
+17 small additions filling gaps in the `LoroDoc` surface:
+
+- **Identity**: `peer_id/1`, `set_peer_id/2`.
+- **State predicates**: `shallow?/1`, `has_container/2`,
+  `pending_txn_len/1`.
+- **Sizing & analysis**: `len_ops/1`, `len_changes/1`, `analyze/1`
+  (returns per-container size / depth / ops-num / dropped /
+  last-edit-time as JSON).
+- **Path & deep value**: `get_path_to_container/2` (returns the
+  root-to-target path, eliminating the need for consumer apps to
+  maintain their own CID-path index), `get_deep_value_with_id/1`
+  (full state preserving CIDs).
+- **Sync helpers**: `import_batch/2` (atomic batch import — single
+  mutex / single commit), `from_snapshot/1` (one-shot constructor),
+  `decode_import_blob_meta/2` (peek at a blob without importing —
+  useful for auth, quota, corruption checks), `fork_at/2` (fork at
+  a specific frontier).
+- **Memory hygiene**: `free_history_cache/1`, `free_diff_calculator/1`,
+  `compact_change_store/1`.
+
+### API decisions documented in this release
+
+- `shallow?/1` is the public Elixir-idiomatic name; the Native stub
+  keeps `is_shallow` (matching Loro's Rust function) with a Credo
+  override.
+- `movable_list_move/4` uses the full Elixir verb rather than Loro's
+  Rust abbreviation `mov`.
+- Tree parent variants project as the atoms `:root`, `:deleted`,
+  `:unexist`, with `{:ok, id}` for the value case.
+- All Rust struct returns (`DocAnalysis`, `ImportBlobMetadata`,
+  container path, deep value with id) are JSON strings, matching the
+  existing `get_map_json` / `tree_get_nodes` pattern.
+
+### Internal
+
+- Adds `:root`, `:deleted`, `:unexist` atoms for tree-parent variants.
+- New helper `get_movable_list_handle/2` next to the existing
+  `get_list_handle` / `get_tree_handle`.
+- 42 new tests; suite grows from 91 → 133 `:nif`-tagged tests.
+
 ## [0.7.0] — 2026-05-12
 
 ### Added

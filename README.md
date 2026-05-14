@@ -130,7 +130,7 @@ def deps do
   [
     {:loro_ex,
      git: "https://github.com/bmalum/loro_ex.git",
-     tag: "v0.5.0"}
+     tag: "v0.8.0"}
   ]
 end
 ```
@@ -217,17 +217,25 @@ generates HTML. High-level surface:
 ### Lifecycle
 - `LoroEx.new/0` — new doc with random peer id
 - `LoroEx.new/1` — new doc with explicit peer id (deterministic tests)
+- `LoroEx.fork/1`, `LoroEx.fork_at/2` — independent clones (live state / at frontier)
+- `LoroEx.from_snapshot/1` — one-shot construct + import
+- `LoroEx.peer_id/1`, `LoroEx.set_peer_id/2` — runtime peer-id getter/setter
 
 ### Sync primitives
-- `LoroEx.apply_update/2` — apply bytes from `export_snapshot` or
-  `export_updates`
-- `LoroEx.export_snapshot/1` — full state, self-contained
-- `LoroEx.export_shallow_snapshot/2` — trimmed snapshot starting at a
-  frontier (for new joiners)
-- `LoroEx.export_updates/2` — delta since a version
+- `LoroEx.apply_update/2`, `LoroEx.import_batch/2` — single & batch imports
+- `LoroEx.export_snapshot/1`, `LoroEx.export_shallow_snapshot/2`, `LoroEx.export_updates/2`
 - `LoroEx.oplog_version/1`, `state_vector/1` — opaque version vectors
-- `LoroEx.oplog_frontiers/1`, `state_frontiers/1`,
-  `shallow_since_frontiers/1` — opaque frontiers
+- `LoroEx.oplog_frontiers/1`, `state_frontiers/1`, `shallow_since_frontiers/1` — opaque frontiers
+- `LoroEx.containers_touched_since/2` — diff-scope CIDs since a version
+- `LoroEx.decode_import_blob_meta/2` — peek at a blob without importing
+- `LoroEx.revert_to/2` — emit inverse ops to rewind to a frontier
+
+### Doc introspection & memory hygiene
+- `LoroEx.shallow?/1`, `LoroEx.has_container/2`, `LoroEx.pending_txn_len/1`
+- `LoroEx.len_ops/1`, `LoroEx.len_changes/1`, `LoroEx.analyze/1`
+- `LoroEx.get_path_to_container/2`, `LoroEx.get_deep_value_with_id/1`
+- `LoroEx.free_history_cache/1`, `LoroEx.free_diff_calculator/1`,
+  `LoroEx.compact_change_store/1`
 
 ### Text containers — plain
 - `LoroEx.get_text/2`, `insert_text/4`, `delete_text/4`
@@ -240,7 +248,8 @@ generates HTML. High-level surface:
 - `LoroEx.text_get_richtext_value/2` — decoded segment list
 
 ### Cursors (stable positions)
-- `LoroEx.text_get_cursor/4`, `list_get_cursor/4` — produce an opaque cursor
+- `LoroEx.text_get_cursor/4`, `list_get_cursor/4`,
+  `movable_list_get_cursor/4` — produce an opaque cursor
 - `LoroEx.cursor_resolve/2` — resolve a cursor to its current `{pos, side}`
 
 ### Map containers
@@ -251,10 +260,18 @@ generates HTML. High-level surface:
 - `LoroEx.list_get_json/2`, `list_push/3`, `list_delete/4`
 - `LoroEx.list_insert_container/4`
 
+### Movable list
+- `LoroEx.movable_list_*` — full surface (push/insert/delete/set/move/pop/clear)
+  plus per-element peer attribution (`get_creator_at`, `get_last_mover_at`,
+  `get_last_editor_at`)
+
 ### Movable tree
-- `LoroEx.tree_create_node/3`, `tree_move_node/5`, `tree_delete_node/3`,
-  `tree_get_nodes/2`
-- `LoroEx.tree_get_meta/3` — per-node metadata map
+- Mutations: `LoroEx.tree_create_node/3`, `tree_move_node/5`, `tree_delete_node/3`
+- Queries: `LoroEx.tree_parent/3`, `tree_children/3`, `tree_roots/2`,
+  `tree_contains/3`, `tree_is_node_deleted/3`, `tree_fractional_index/3`,
+  `tree_children_num/3`
+- Read: `LoroEx.tree_get_nodes/2`, `tree_get_value_with_meta/2`,
+  `tree_get_meta/3`
 
 ### Undo / redo
 `LoroEx.UndoManager` — per-peer undo history. See the
