@@ -413,6 +413,56 @@ fn export_updates_from(doc: ResourceArc<DocResource>, version: Binary) -> NifRes
     bytes_to_owned_binary(&bytes)
 }
 
+/// Return the set of distinct container ids touched by ops in the
+/// half-open range `(from_vv, current_oplog_vv]`.
+///
+/// The cost is O(ops_since), not O(doc_size). For a small gap this is
+/// microseconds; for a huge replay it scales with the size of the
+/// replay.
+///
+/// Implementation note: Loro 1.12 does not expose `OpLog::iter_ops`
+/// publicly, so we go through `export_json_updates_without_peer_compression`.
+/// We use the non-compressed variant on purpose — the compressed
+/// variant rewrites peer ids to small indices in the schema, which
+/// would mangle ContainerID strings (`cid:1@<peer>:Text` becomes
+/// `cid:1@<index>:Text`). Callers expect to feed the returned strings
+/// straight back into other LoroEx functions, so they must match the
+/// real peer-tagged form.
+///
+/// The schema is materialized but never serialized — we walk it once
+/// to harvest CIDs and drop it. If profiling later flags this as hot,
+/// we can switch to a direct `change_store().iter_changes(span)` walk
+/// via `with_oplog` once upstream exposes it.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn containers_touched_since(
+    doc: ResourceArc<DocResource>,
+    from_vv: Binary,
+) -> NifResult<Vec<String>> {
+    use std::collections::HashSet;
+
+    let from_vv = VersionVector::decode(from_vv.as_slice()).map_err(loro_err_to_nif)?;
+
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let current_vv = guard.oplog_vv();
+
+    if from_vv == current_vv {
+        return Ok(Vec::new());
+    }
+
+    let schema = guard.export_json_updates_without_peer_compression(&from_vv, &current_vv);
+
+    let mut seen: HashSet<ContainerID> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for change in &schema.changes {
+        for op in &change.ops {
+            if seen.insert(op.container.clone()) {
+                out.push(op.container.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn oplog_version(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;

@@ -48,6 +48,7 @@ defmodule LoroEx.Native do
   def export_snapshot(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def export_shallow_snapshot(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
   def export_updates_from(_doc, _version), do: :erlang.nif_error(:nif_not_loaded)
+  def containers_touched_since(_doc, _from_vv), do: :erlang.nif_error(:nif_not_loaded)
   def oplog_version(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def state_vector(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def oplog_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)

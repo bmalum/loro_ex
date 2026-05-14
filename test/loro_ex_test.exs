@@ -38,6 +38,92 @@ defmodule LoroExTest do
     end
   end
 
+  describe "containers_touched_since" do
+    @tag :nif
+    test "returns empty list when no edits have happened" do
+      doc = LoroEx.new()
+      v = LoroEx.oplog_version(doc)
+      assert LoroEx.containers_touched_since(doc, v) == []
+    end
+
+    @tag :nif
+    test "single text edit returns one Text CID" do
+      doc = LoroEx.new()
+      v0 = LoroEx.oplog_version(doc)
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+      assert [cid] = LoroEx.containers_touched_since(doc, v0)
+      assert is_binary(cid)
+      assert String.ends_with?(cid, ":Text")
+    end
+
+    @tag :nif
+    test "edits on multiple containers return all of them" do
+      doc = LoroEx.new()
+      v0 = LoroEx.oplog_version(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("dark"))
+
+      cids = doc |> LoroEx.containers_touched_since(v0) |> Enum.sort()
+      assert length(cids) == 2
+      assert Enum.any?(cids, &String.ends_with?(&1, ":Text"))
+      assert Enum.any?(cids, &String.ends_with?(&1, ":Map"))
+    end
+
+    @tag :nif
+    test "multiple ops on the same container deduplicate" do
+      doc = LoroEx.new()
+      v0 = LoroEx.oplog_version(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "a")
+      :ok = LoroEx.insert_text(doc, "body", 1, "b")
+      :ok = LoroEx.insert_text(doc, "body", 2, "c")
+
+      assert [_one_cid] = LoroEx.containers_touched_since(doc, v0)
+    end
+
+    @tag :nif
+    test "nested-container edits surface the nested CID" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "m", "_init", ~s("seed"))
+      child_cid = LoroEx.map_insert_container(doc, "m", "child", :text)
+
+      v0 = LoroEx.oplog_version(doc)
+      :ok = LoroEx.insert_text(doc, child_cid, 0, "deep")
+
+      cids = LoroEx.containers_touched_since(doc, v0)
+      assert child_cid in cids
+    end
+
+    @tag :nif
+    test "malformed version vector returns :invalid_version_vector" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "x")
+
+      # Empty binary is rejected by postcard's varint decoder cleanly.
+      assert {:error, {:invalid_version_vector, _detail}} =
+               LoroEx.containers_touched_since(doc, <<>>)
+    end
+
+    @tag :nif
+    test "only ops after a snapshot watermark are reported" do
+      a = LoroEx.new(1)
+      b = LoroEx.new(2)
+
+      :ok = LoroEx.insert_text(a, "body", 0, "before snapshot")
+      :ok = LoroEx.apply_update(b, LoroEx.export_snapshot(a))
+      watermark = LoroEx.oplog_version(a)
+
+      :ok = LoroEx.insert_text(a, "body", 0, "X")
+      :ok = LoroEx.map_set(a, "after", "k", ~s("v"))
+
+      cids = a |> LoroEx.containers_touched_since(watermark) |> Enum.sort()
+      assert length(cids) == 2
+      assert Enum.any?(cids, &String.ends_with?(&1, ":Text"))
+      assert Enum.any?(cids, &String.ends_with?(&1, ":Map"))
+    end
+  end
+
   describe "movable tree" do
     @tag :nif
     test "concurrent moves converge without cycle" do
