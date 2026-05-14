@@ -1662,6 +1662,153 @@ defmodule LoroEx do
   defdelegate list_get_child_cid(doc, container_id, index), to: Native
 
   # ============================================================================
+  # MovableList
+  # ============================================================================
+
+  @doc """
+  Read a movable list as a JSON string. Identical shape to
+  `list_get_json/2` — the `:movable_list` kind is on the wire as a
+  flat JSON array, the "movable" semantics live in the CRDT layer.
+  """
+  @spec movable_list_get_json(doc(), container_id()) :: String.t() | error()
+  defdelegate movable_list_get_json(doc, container_id), to: Native
+
+  @doc "Number of elements in a movable list."
+  @spec movable_list_length(doc(), container_id()) :: non_neg_integer() | error()
+  defdelegate movable_list_length(doc, container_id), to: Native
+
+  @doc """
+  Read a single element by index. Returns `"null"` if out of bounds
+  (matching `list_get_json_at/3`).
+  """
+  @spec movable_list_get_json_at(doc(), container_id(), non_neg_integer()) ::
+          String.t() | error()
+  defdelegate movable_list_get_json_at(doc, container_id, index), to: Native
+
+  @doc "Append a JSON value to a movable list."
+  @spec movable_list_push(doc(), container_id(), String.t()) :: :ok | error()
+  defdelegate movable_list_push(doc, container_id, value_json), to: Native
+
+  @doc """
+  Insert a JSON value at `pos`. Errors with `:out_of_bound` if
+  `pos > length`.
+  """
+  @spec movable_list_insert(doc(), container_id(), non_neg_integer(), String.t()) ::
+          :ok | error()
+  defdelegate movable_list_insert(doc, container_id, pos, value_json), to: Native
+
+  @doc """
+  Replace the scalar value at `index` in place. MovableList-only —
+  there is no equivalent on `LoroEx.list_*`.
+  """
+  @spec movable_list_set(doc(), container_id(), non_neg_integer(), String.t()) ::
+          :ok | error()
+  defdelegate movable_list_set(doc, container_id, index, value_json), to: Native
+
+  @doc """
+  Move the element at `from` to `to`. MovableList-only — the
+  headline feature. Identity is preserved across moves so concurrent
+  moves of the same element converge.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.movable_list_push(doc, "rows", ~s("a"))
+      :ok = LoroEx.movable_list_push(doc, "rows", ~s("b"))
+      :ok = LoroEx.movable_list_push(doc, "rows", ~s("c"))
+      :ok = LoroEx.movable_list_move(doc, "rows", 0, 2)
+      LoroEx.movable_list_get_json(doc, "rows")
+      # => ~s(["b","c","a"])
+  """
+  @spec movable_list_move(doc(), container_id(), non_neg_integer(), non_neg_integer()) ::
+          :ok | error()
+  defdelegate movable_list_move(doc, container_id, from, to), to: Native
+
+  @doc "Delete a slice of `len` elements starting at `index`."
+  @spec movable_list_delete(doc(), container_id(), non_neg_integer(), non_neg_integer()) ::
+          :ok | error()
+  defdelegate movable_list_delete(doc, container_id, index, len), to: Native
+
+  @doc """
+  Pop the last element. Returns the JSON value (or `"null"` for an
+  empty list).
+  """
+  @spec movable_list_pop(doc(), container_id()) :: String.t() | error()
+  defdelegate movable_list_pop(doc, container_id), to: Native
+
+  @doc "Remove all elements."
+  @spec movable_list_clear(doc(), container_id()) :: :ok | error()
+  defdelegate movable_list_clear(doc, container_id), to: Native
+
+  @doc """
+  Insert a fresh nested container at `pos`. See `list_insert_container/4`
+  for the kind atoms. Returns the child container's CID.
+  """
+  @spec movable_list_insert_container(doc(), container_id(), non_neg_integer(), container_kind()) ::
+          container_id() | error()
+  defdelegate movable_list_insert_container(doc, container_id, pos, kind), to: Native
+
+  @doc """
+  Replace the value at `index` with a fresh container of the given
+  kind. MovableList-only.
+  """
+  @spec movable_list_set_container(doc(), container_id(), non_neg_integer(), container_kind()) ::
+          container_id() | error()
+  defdelegate movable_list_set_container(doc, container_id, index, kind), to: Native
+
+  @doc """
+  Idempotent, race-free "ensure a child container at this index" for
+  movable lists. Mirrors `list_get_or_create_container/4`.
+  """
+  @spec movable_list_get_or_create_container(
+          doc(),
+          container_id(),
+          non_neg_integer(),
+          container_kind()
+        ) :: container_id() | error()
+  defdelegate movable_list_get_or_create_container(doc, container_id, index, kind), to: Native
+
+  @doc """
+  Return the child container's CID at `index`, or `nil` if the
+  element is a scalar / out of bounds.
+  """
+  @spec movable_list_get_child_cid(doc(), container_id(), non_neg_integer()) ::
+          container_id() | nil | error()
+  defdelegate movable_list_get_child_cid(doc, container_id, index), to: Native
+
+  @doc """
+  Encode a stable cursor at `pos` with `side` bias. Survives moves
+  and edits — see `cursor_resolve/2` for retrieval.
+  """
+  @spec movable_list_get_cursor(doc(), container_id(), non_neg_integer(), cursor_side()) ::
+          cursor() | nil | error()
+  defdelegate movable_list_get_cursor(doc, container_id, pos, side), to: Native
+
+  @doc """
+  Peer id of the peer that originally inserted the element at `pos`.
+  Returns `nil` for an out-of-bounds index.
+  """
+  @spec movable_list_get_creator_at(doc(), container_id(), non_neg_integer()) ::
+          non_neg_integer() | nil | error()
+  defdelegate movable_list_get_creator_at(doc, container_id, pos), to: Native
+
+  @doc """
+  Peer id of the peer that last `move`d the element at `pos`. Distinct
+  from `creator_at` because elements keep identity across moves.
+  """
+  @spec movable_list_get_last_mover_at(doc(), container_id(), non_neg_integer()) ::
+          non_neg_integer() | nil | error()
+  defdelegate movable_list_get_last_mover_at(doc, container_id, pos), to: Native
+
+  @doc """
+  Peer id of the peer that last `set` / `set_container`'d the element
+  at `pos`. Distinct from creator and mover.
+  """
+  @spec movable_list_get_last_editor_at(doc(), container_id(), non_neg_integer()) ::
+          non_neg_integer() | nil | error()
+  defdelegate movable_list_get_last_editor_at(doc, container_id, pos), to: Native
+
+  # ============================================================================
   # Tree (movable)
   # ============================================================================
 

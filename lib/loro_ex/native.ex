@@ -135,6 +135,35 @@ defmodule LoroEx.Native do
   def list_length(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
   def list_get_json_at(_doc, _cid, _index), do: :erlang.nif_error(:nif_not_loaded)
 
+  # MovableList ---------------------------------------------------------------
+
+  def movable_list_get_json(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_length(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_get_json_at(_doc, _cid, _index), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_push(_doc, _cid, _value_json), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_insert(_doc, _cid, _pos, _value_json), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_set(_doc, _cid, _index, _value_json), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_move(_doc, _cid, _from, _to), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_delete(_doc, _cid, _index, _len), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_pop(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_clear(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+
+  def movable_list_insert_container(_doc, _cid, _pos, _kind),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def movable_list_set_container(_doc, _cid, _index, _kind),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def movable_list_get_child_cid(_doc, _cid, _index), do: :erlang.nif_error(:nif_not_loaded)
+
+  def movable_list_get_or_create_container(_doc, _cid, _index, _kind),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def movable_list_get_cursor(_doc, _cid, _pos, _side), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_get_creator_at(_doc, _cid, _pos), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_get_last_mover_at(_doc, _cid, _pos), do: :erlang.nif_error(:nif_not_loaded)
+  def movable_list_get_last_editor_at(_doc, _cid, _pos), do: :erlang.nif_error(:nif_not_loaded)
+
   # Movable tree --------------------------------------------------------------
 
   def tree_create_node(_doc, _tree_id, _parent_id), do: :erlang.nif_error(:nif_not_loaded)
