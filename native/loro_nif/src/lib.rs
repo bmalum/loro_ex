@@ -227,6 +227,13 @@ fn get_list_handle(doc: &LoroDoc, id: &str) -> loro::LoroList {
     }
 }
 
+fn get_movable_list_handle(doc: &LoroDoc, id: &str) -> loro::LoroMovableList {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_movable_list(cid),
+        None => doc.get_movable_list(id),
+    }
+}
+
 fn get_tree_handle(doc: &LoroDoc, id: &str) -> loro::LoroTree {
     match try_parse_container_id(id) {
         Some(cid) => doc.get_tree(cid),
@@ -1436,6 +1443,404 @@ fn list_get_child_cid(
         Some(ValueOrContainer::Container(c)) => Some(c.id().to_string()),
         _ => None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// MovableList
+// ---------------------------------------------------------------------------
+//
+// Mirrors the List surface plus the MovableList-only ops:
+//   * `mov` (move an element from one index to another, preserving identity)
+//   * `set` / `set_container` (replace value at index in place)
+//   * `pop`, `clear` (convenience)
+//   * `get_creator_at` / `get_last_mover_at` / `get_last_editor_at`
+//     (peer attribution telemetry — MovableList tracks per-element history)
+//
+// These ops are why MovableList exists: a plain List can't express
+// "move this element" without losing its identity to the Peritext-style
+// merger. MovableList does, so concurrent moves converge.
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_json(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let value = get_movable_list_handle(&guard, &container_id).get_deep_value();
+    serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_length(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<u32> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(get_movable_list_handle(&guard, &container_id).len() as u32)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_json_at(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    match list.get(index as usize) {
+        Some(v) => serde_json::to_string(&v.get_deep_value()).map_err(json_err_to_nif),
+        None => Ok("null".to_string()),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_push(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    value_json: String,
+) -> NifResult<Atom> {
+    let value = parse_scalar_json(&value_json)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.push(value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_insert(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    value_json: String,
+) -> NifResult<Atom> {
+    let value = parse_scalar_json(&value_json)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.insert(pos as usize, value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Replace the scalar value at `index`. MovableList-only — plain
+/// List lacks a set-by-index op.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_set(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    value_json: String,
+) -> NifResult<Atom> {
+    let value = parse_scalar_json(&value_json)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.set(index as usize, value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Move the element at `from` to `to`. MovableList-only — the
+/// headline feature that distinguishes it from List. Identity is
+/// preserved across the move so concurrent moves of the same
+/// element converge.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_move(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    from: u32,
+    to: u32,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.mov(from as usize, to as usize)
+        .map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_delete(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    len: u32,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.delete(index as usize, len as usize)
+        .map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Pop the last element. Returns `null` JSON for an empty list,
+/// otherwise the deep JSON value of what was removed.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_pop(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    let popped = list.pop().map_err(loro_err_to_nif)?;
+    guard.commit();
+    match popped {
+        Some(v) => serde_json::to_string(&v.get_deep_value()).map_err(json_err_to_nif),
+        None => Ok("null".to_string()),
+    }
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_clear(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    list.clear().map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_insert_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::ContainerTrait;
+    let kind = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    let p = pos as usize;
+    let cid_str = match kind {
+        ContainerType::Text => list
+            .insert_container(p, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => list
+            .insert_container(p, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => list
+            .insert_container(p, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => list
+            .insert_container(p, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
+}
+
+/// Replace the value at `index` with a fresh container of the given
+/// kind. MovableList-only.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_set_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::ContainerTrait;
+    let kind = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    let i = index as usize;
+    let cid_str = match kind {
+        ContainerType::Text => list
+            .set_container(i, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => list
+            .set_container(i, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => list
+            .set_container(i, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => list
+            .set_container(i, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_or_create_container(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+    kind: Atom,
+) -> NifResult<String> {
+    use loro::{Container, ContainerTrait};
+
+    let requested = atom_to_container_type(kind)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    let idx = index as usize;
+    let len = list.len();
+
+    if idx < len {
+        match list.get(idx) {
+            Some(ValueOrContainer::Container(c)) => {
+                let actual = match &c {
+                    Container::Text(_) => ContainerType::Text,
+                    Container::Map(_) => ContainerType::Map,
+                    Container::List(_) => ContainerType::List,
+                    Container::MovableList(_) => ContainerType::MovableList,
+                    Container::Tree(_) => ContainerType::Tree,
+                    _ => {
+                        return Err(invalid_value_err(
+                            "existing child has an unsupported container kind",
+                        ));
+                    }
+                };
+                if actual != requested {
+                    return Err(NifError::Term(Box::new((
+                        atoms::invalid_container_kind(),
+                        format!(
+                            "index {} already holds a {:?} container, requested {:?}",
+                            idx, actual, requested
+                        ),
+                    ))));
+                }
+                return Ok(c.id().to_string());
+            }
+            Some(ValueOrContainer::Value(_)) => {
+                return Err(invalid_value_err(
+                    "index already holds a scalar value; refusing to clobber",
+                ));
+            }
+            None => {}
+        }
+    } else if idx > len {
+        return Err(NifError::Term(Box::new((
+            atoms::out_of_bound(),
+            format!("index {} > len {}", idx, len),
+        ))));
+    }
+
+    // idx == len → insert at the end.
+    let cid_str = match requested {
+        ContainerType::Text => list
+            .insert_container(len, loro::LoroText::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::Map => list
+            .insert_container(len, loro::LoroMap::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::List => list
+            .insert_container(len, loro::LoroList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        ContainerType::MovableList => list
+            .insert_container(len, loro::LoroMovableList::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
+        _ => {
+            return Err(invalid_value_err(
+                "only :text | :map | :list | :movable_list are supported",
+            ));
+        }
+    };
+    guard.commit();
+    Ok(cid_str)
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_child_cid(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    index: u32,
+) -> NifResult<Option<String>> {
+    use loro::ContainerTrait;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    Ok(match list.get(index as usize) {
+        Some(ValueOrContainer::Container(c)) => Some(c.id().to_string()),
+        _ => None,
+    })
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_cursor<'a>(
+    env: rustler::Env<'a>,
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+    side: Atom,
+) -> NifResult<rustler::Term<'a>> {
+    let side = atom_to_side(side)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    match list.get_cursor(pos as usize, side) {
+        Some(cursor) => {
+            let encoded = cursor.encode();
+            let mut bin = rustler::NewBinary::new(env, encoded.len());
+            bin.as_mut_slice().copy_from_slice(&encoded);
+            let term: rustler::Term = bin.into();
+            Ok(term)
+        }
+        None => Ok(rustler::types::atom::nil().to_term(env)),
+    }
+}
+
+/// Peer id of the peer that originally inserted the element at `pos`.
+/// Returns `nil` if the index is out of bounds. Useful for attribution
+/// UIs ("X added this row").
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_creator_at(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+) -> NifResult<Option<u64>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    Ok(list.get_creator_at(pos as usize))
+}
+
+/// Peer id of the peer that last moved the element at `pos`. Different
+/// from `creator_at` because elements keep identity across moves.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_last_mover_at(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+) -> NifResult<Option<u64>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    Ok(list.get_last_mover_at(pos as usize))
+}
+
+/// Peer id of the peer that last `set`/`set_container`'d the element
+/// at `pos`. Distinct from creator and mover.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn movable_list_get_last_editor_at(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    pos: u32,
+) -> NifResult<Option<u64>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let list = get_movable_list_handle(&guard, &container_id);
+    Ok(list.get_last_editor_at(pos as usize))
 }
 
 // ---------------------------------------------------------------------------

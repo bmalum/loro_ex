@@ -285,6 +285,167 @@ defmodule LoroExTest do
     end
   end
 
+  describe "movable list" do
+    @tag :nif
+    test "push, length, get_json round-trip" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("a"))
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("b"))
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("c"))
+
+      assert LoroEx.movable_list_length(doc, ml) == 3
+      assert {:ok, ["a", "b", "c"]} = LoroEx.movable_list_get_json(doc, ml) |> Jason.decode()
+    end
+
+    @tag :nif
+    test "insert and delete shift the list" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("a"))
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("c"))
+      :ok = LoroEx.movable_list_insert(doc, ml, 1, ~s("b"))
+      assert {:ok, ["a", "b", "c"]} = LoroEx.movable_list_get_json(doc, ml) |> Jason.decode()
+
+      :ok = LoroEx.movable_list_delete(doc, ml, 0, 2)
+      assert {:ok, ["c"]} = LoroEx.movable_list_get_json(doc, ml) |> Jason.decode()
+    end
+
+    @tag :nif
+    test "set replaces in place without changing length" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("a"))
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("b"))
+      :ok = LoroEx.movable_list_set(doc, ml, 1, ~s("Z"))
+      assert {:ok, ["a", "Z"]} = LoroEx.movable_list_get_json(doc, ml) |> Jason.decode()
+      assert LoroEx.movable_list_length(doc, ml) == 2
+    end
+
+    @tag :nif
+    test "move from→to permutes the list" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      for v <- ["a", "b", "c"], do: :ok = LoroEx.movable_list_push(doc, ml, ~s("#{v}"))
+
+      :ok = LoroEx.movable_list_move(doc, ml, 0, 2)
+      assert {:ok, ["b", "c", "a"]} = LoroEx.movable_list_get_json(doc, ml) |> Jason.decode()
+    end
+
+    @tag :nif
+    test "concurrent moves of distinct elements converge" do
+      alice = LoroEx.new(1)
+      bob = LoroEx.new(2)
+
+      ml = LoroEx.map_insert_container(alice, "m", "rows", :movable_list)
+      for v <- ["a", "b", "c"], do: :ok = LoroEx.movable_list_push(alice, ml, ~s("#{v}"))
+      :ok = LoroEx.apply_update(bob, LoroEx.export_snapshot(alice))
+
+      # Alice moves 0 → 2; Bob concurrently moves 2 → 0.
+      :ok = LoroEx.movable_list_move(alice, ml, 0, 2)
+      :ok = LoroEx.movable_list_move(bob, ml, 2, 0)
+
+      :ok = LoroEx.apply_update(alice, LoroEx.export_snapshot(bob))
+      :ok = LoroEx.apply_update(bob, LoroEx.export_snapshot(alice))
+
+      assert LoroEx.movable_list_get_json(alice, ml) ==
+               LoroEx.movable_list_get_json(bob, ml)
+    end
+
+    @tag :nif
+    test "pop returns the last element and shrinks length" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("first"))
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("last"))
+
+      assert ~s("last") == LoroEx.movable_list_pop(doc, ml)
+      assert LoroEx.movable_list_length(doc, ml) == 1
+      assert "null" == LoroEx.movable_list_pop(LoroEx.new(), "empty")
+    end
+
+    @tag :nif
+    test "clear removes everything" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+      for v <- ["a", "b", "c"], do: :ok = LoroEx.movable_list_push(doc, ml, ~s("#{v}"))
+
+      :ok = LoroEx.movable_list_clear(doc, ml)
+      assert LoroEx.movable_list_length(doc, ml) == 0
+    end
+
+    @tag :nif
+    test "insert_container + get_child_cid produce a writable nested CID" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      child_cid = LoroEx.movable_list_insert_container(doc, ml, 0, :map)
+      assert is_binary(child_cid)
+      assert ^child_cid = LoroEx.movable_list_get_child_cid(doc, ml, 0)
+
+      :ok = LoroEx.map_set(doc, child_cid, "k", ~s("v"))
+      assert {:ok, %{"k" => "v"}} = LoroEx.get_map_json(doc, child_cid) |> Jason.decode()
+    end
+
+    @tag :nif
+    test "set_container replaces a scalar at index with a fresh container" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+      :ok = LoroEx.movable_list_push(doc, ml, ~s("scalar"))
+
+      child_cid = LoroEx.movable_list_set_container(doc, ml, 0, :text)
+      assert is_binary(child_cid)
+      :ok = LoroEx.insert_text(doc, child_cid, 0, "swapped")
+      assert "swapped" == LoroEx.get_text(doc, child_cid)
+    end
+
+    @tag :nif
+    test "get_or_create_container is idempotent for the same kind" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+
+      cid1 = LoroEx.movable_list_get_or_create_container(doc, ml, 0, :map)
+      cid2 = LoroEx.movable_list_get_or_create_container(doc, ml, 0, :map)
+      assert cid1 == cid2
+
+      assert {:error, {:invalid_container_kind, _}} =
+               LoroEx.movable_list_get_or_create_container(doc, ml, 0, :text)
+    end
+
+    @tag :nif
+    test "creator_at and last_mover_at attribute peers" do
+      alice = LoroEx.new(1)
+      ml = LoroEx.map_insert_container(alice, "m", "rows", :movable_list)
+      :ok = LoroEx.movable_list_push(alice, ml, ~s("a"))
+      :ok = LoroEx.movable_list_push(alice, ml, ~s("b"))
+
+      bob = LoroEx.new(2)
+      :ok = LoroEx.apply_update(bob, LoroEx.export_snapshot(alice))
+      :ok = LoroEx.movable_list_move(bob, ml, 0, 1)
+
+      assert LoroEx.movable_list_get_creator_at(alice, ml, 0) == 1
+      assert LoroEx.movable_list_get_last_mover_at(bob, ml, 1) == 2
+    end
+
+    @tag :nif
+    test "get_cursor + cursor_resolve track positions across edits" do
+      doc = LoroEx.new()
+      ml = LoroEx.map_insert_container(doc, "m", "rows", :movable_list)
+      for v <- ["a", "b", "c"], do: :ok = LoroEx.movable_list_push(doc, ml, ~s("#{v}"))
+
+      cursor = LoroEx.movable_list_get_cursor(doc, ml, 1, :left)
+      assert is_binary(cursor)
+      assert {pos, side} = LoroEx.cursor_resolve(doc, cursor)
+      assert pos == 1
+      assert side in [:left, :middle, :right]
+    end
+  end
+
   describe "movable tree" do
     @tag :nif
     test "concurrent moves converge without cycle" do
