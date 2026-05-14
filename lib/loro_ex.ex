@@ -245,6 +245,57 @@ defmodule LoroEx do
   @spec fork(doc()) :: doc() | error()
   defdelegate fork(doc), to: Native
 
+  @doc """
+  Like `fork/1` but the clone observes only the history up to a
+  specific frontier rather than the parent's current state. Useful for
+  exporting a snapshot **as of** a past version without affecting the
+  live doc.
+
+  Returns `{:error, {:invalid_frontier, _}}` if the frontier doesn't
+  decode, or `{:error, {:not_found, _}}` if it references ops the doc
+  doesn't have.
+  """
+  @spec fork_at(doc(), frontier()) :: doc() | error()
+  defdelegate fork_at(doc, frontier), to: Native
+
+  @doc """
+  Construct a fresh doc and import a snapshot in one call. Cheaper
+  than `new/0` followed by `apply_update/2` because the snapshot is
+  loaded directly into the doc's initial state.
+
+  ## Example
+
+      bytes = LoroEx.export_snapshot(server_doc)
+      doc = LoroEx.from_snapshot(bytes)
+      LoroEx.get_text(doc, "body")
+  """
+  @spec from_snapshot(binary()) :: doc() | error()
+  defdelegate from_snapshot(bytes), to: Native
+
+  @doc """
+  Return the doc's current peer id.
+
+  ## Example
+
+      doc = LoroEx.new(42)
+      LoroEx.peer_id(doc)
+      # => 42
+  """
+  @spec peer_id(doc()) :: non_neg_integer() | error()
+  defdelegate peer_id(doc), to: Native
+
+  @doc """
+  Replace the doc's peer id at runtime.
+
+  Most callers should set the peer id at construction via `new/1`.
+  Use this only if you need to adopt a new peer id mid-session.
+
+  Errors with `{:error, {:invalid_peer_id, _}}` if the peer id is the
+  reserved `PeerID::MAX` value.
+  """
+  @spec set_peer_id(doc(), non_neg_integer()) :: :ok | error()
+  defdelegate set_peer_id(doc, peer_id), to: Native
+
   # ============================================================================
   # Sync primitives
   # ============================================================================
@@ -287,6 +338,44 @@ defmodule LoroEx do
   """
   @spec apply_update(doc(), binary()) :: :ok | error()
   defdelegate apply_update(doc, bytes), to: Native
+
+  @doc """
+  Apply a batch of updates atomically. Acquires the doc mutex once
+  for the whole batch and emits a single commit.
+
+  Faster than looping `apply_update/2` when replaying a queue of
+  updates, e.g. on cold-hydrate from durable storage. Errors short-
+  circuit the batch — partial application is possible if Loro accepts
+  some updates and then fails on a later one.
+
+  ## Example
+
+      :ok = LoroEx.import_batch(doc, [snap1, delta_a, delta_b])
+  """
+  @spec import_batch(doc(), [binary()]) :: :ok | error()
+  defdelegate import_batch(doc, updates), to: Native
+
+  @doc """
+  Inspect the metadata of a snapshot or update blob without
+  importing it. Useful for auth, quota, and corruption checks before
+  committing the bytes to a doc.
+
+  Returns a JSON string with fields:
+
+    * `mode` — `"snapshot"`, `"shallow-snapshot"`, `"update"`,
+      `"outdated-snapshot"`, or `"outdated-update"`
+    * `is_snapshot` — boolean
+    * `start_timestamp`, `end_timestamp` — Unix timestamps (0 if not recorded)
+    * `change_num` — number of changes encoded
+    * `partial_start_vv_size`, `partial_end_vv_size` — peer-id counts in
+      the blob's partial version vectors
+
+  Set `check_checksum` to verify the blob's CRC. Default `false` is
+  faster but accepts blobs with a corrupt body.
+  """
+  @spec decode_import_blob_meta(binary(), boolean()) :: String.t() | error()
+  def decode_import_blob_meta(bytes, check_checksum \\ false),
+    do: Native.decode_import_blob_meta(bytes, check_checksum)
 
   @doc """
   Export the entire document state as a self-contained snapshot.
@@ -526,6 +615,133 @@ defmodule LoroEx do
   """
   @spec shallow_since_frontiers(doc()) :: frontier() | error()
   defdelegate shallow_since_frontiers(doc), to: Native
+
+  # ============================================================================
+  # Doc introspection
+  # ============================================================================
+
+  @doc """
+  `true` if the doc is shallow — i.e. history before
+  `shallow_since_vv` has been trimmed.
+
+  Shallow docs work like normal docs but cannot replay or sync ops
+  that depend on trimmed history. Most consumer-side docs created
+  from a `export_shallow_snapshot/2` blob are shallow.
+  """
+  @spec shallow?(doc()) :: boolean() | error()
+  defdelegate shallow?(doc), to: Native, as: :is_shallow
+
+  @doc """
+  `true` if the given container exists in this doc.
+
+  Root container names always return `true` because Loro materializes
+  roots lazily on first access — a "non-existent" root is conceptually
+  the same as an empty one. For nested containers (CIDs returned from
+  `map_insert_container/4` etc.), returns `true` only if the CID is
+  present in the doc state.
+  """
+  @spec has_container(doc(), container_id()) :: boolean() | error()
+  defdelegate has_container(doc, container_id), to: Native
+
+  @doc """
+  Number of ops queued in the pending transaction. Pending ops have
+  been recorded by mutations but not yet committed; in normal use
+  this is `0` between calls because every mutation triggers a commit.
+  """
+  @spec pending_txn_len(doc()) :: non_neg_integer() | error()
+  defdelegate pending_txn_len(doc), to: Native
+
+  @doc """
+  Total number of ops in the op log (committed only).
+  """
+  @spec len_ops(doc()) :: non_neg_integer() | error()
+  defdelegate len_ops(doc), to: Native
+
+  @doc """
+  Total number of changes (op-batches) in the op log. A "change"
+  groups consecutive ops by the same peer with the same parent.
+  """
+  @spec len_changes(doc()) :: non_neg_integer() | error()
+  defdelegate len_changes(doc), to: Native
+
+  @doc """
+  Return doc analysis as a JSON string. Useful for telemetry.
+
+  Shape:
+
+      %{
+        "containers" => %{
+          "<cid>" => %{
+            "size" => 31,
+            "depth" => 1,
+            "ops_num" => 2,
+            "dropped" => false,
+            "last_edit_time" => 0
+          }
+        }
+      }
+  """
+  @spec analyze(doc()) :: String.t() | error()
+  defdelegate analyze(doc), to: Native
+
+  @doc """
+  Return the path from root to the given container as a JSON array
+  of `[cid, index]` pairs.
+
+  `index` is either a string (map key, tree node id) or an integer
+  (list / movable-list position). Returns the JSON string `"null"`
+  if the container does not exist or `container_id` is a root name
+  that has never been referenced.
+
+  ## Example
+
+      :ok = LoroEx.map_set(doc, "m", "_init", ~s("seed"))
+      cid = LoroEx.map_insert_container(doc, "m", "child", :text)
+
+      LoroEx.get_path_to_container(doc, cid)
+      # => ~s([["cid:root-m:Map", "child"]])
+  """
+  @spec get_path_to_container(doc(), container_id()) :: String.t() | error()
+  defdelegate get_path_to_container(doc, container_id), to: Native
+
+  @doc """
+  Return the doc's full state as a JSON string, with each container
+  in the tree wrapped to include its CID.
+
+  Distinct from `get_map_json/2` etc. which strip CIDs. Useful for
+  block-tree introspection where the caller needs CIDs to drive
+  subsequent writes.
+  """
+  @spec get_deep_value_with_id(doc()) :: String.t() | error()
+  defdelegate get_deep_value_with_id(doc), to: Native
+
+  # ============================================================================
+  # Memory hygiene
+  # ============================================================================
+
+  @doc """
+  Drop the cached history index. The doc still works correctly; the
+  next history-traversing op rebuilds the index lazily.
+
+  Cheap to call periodically on long-lived doc handles to keep
+  memory usage flat.
+  """
+  @spec free_history_cache(doc()) :: :ok | error()
+  defdelegate free_history_cache(doc), to: Native
+
+  @doc """
+  Drop the cached structured-diff calculator. Same caveat as
+  `free_history_cache/1` — the next diff-emitting op rebuilds it.
+  """
+  @spec free_diff_calculator(doc()) :: :ok | error()
+  defdelegate free_diff_calculator(doc), to: Native
+
+  @doc """
+  Compact the change store, releasing unused capacity. Cheap to call
+  periodically on long-lived doc handles.
+  """
+  @spec compact_change_store(doc()) :: :ok | error()
+  defdelegate compact_change_store(doc), to: Native
 
   # ============================================================================
   # Text (plain)
