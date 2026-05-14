@@ -78,6 +78,11 @@ mod atoms {
         movable_list,
         tree,
 
+        // Tree parent variants
+        root,
+        deleted,
+        unexist,
+
         // Event tags
         loro_event,
         loro_diff,
@@ -1920,6 +1925,140 @@ fn tree_get_meta(
     let node = parse_tree_id(&node_id)?;
     let meta_map = tree.get_meta(node).map_err(loro_err_to_nif)?;
     Ok(meta_map.id().to_string())
+}
+
+/// Return the parent of `node_id` projected as one of:
+///   * `{:ok, parent_id_string}` — a real parent node
+///   * `:root` — the node is at the top level
+///   * `:deleted` — the node's parent has been deleted
+///   * `:unexist` — `node_id` parses but never existed in this tree
+///
+/// Errors with `:tree_node_not_found` if `node_id` is not a valid
+/// tree-id format.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_parent<'a>(
+    env: rustler::Env<'a>,
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    node_id: String,
+) -> NifResult<rustler::Term<'a>> {
+    use loro::TreeParentId;
+    let node = parse_tree_id(&node_id)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    match tree.parent(node) {
+        Some(TreeParentId::Node(id)) => Ok((atoms::ok(), id.to_string()).encode(env)),
+        Some(TreeParentId::Root) => Ok(atoms::root().encode(env)),
+        Some(TreeParentId::Deleted) => Ok(atoms::deleted().encode(env)),
+        Some(TreeParentId::Unexist) => Ok(atoms::unexist().encode(env)),
+        None => Err(NifError::Term(Box::new((
+            atoms::tree_node_not_found(),
+            format!("node {node_id} not found in tree"),
+        )))),
+    }
+}
+
+/// Return the children of `parent_id` (or root children if
+/// `parent_id` is `nil`). `nil` and missing parents both produce an
+/// empty list — pass an explicit string id to disambiguate.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_children(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    parent_id: Option<String>,
+) -> NifResult<Vec<String>> {
+    use loro::TreeParentId;
+    let parent = match parent_id {
+        Some(s) => TreeParentId::Node(parse_tree_id(&s)?),
+        None => TreeParentId::Root,
+    };
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    Ok(tree
+        .children(parent)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect())
+}
+
+/// Number of direct children under `parent_id` (or root if `nil`).
+/// Returns `0` for a non-existent parent — symmetric with
+/// `tree_children/3`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_children_num(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    parent_id: Option<String>,
+) -> NifResult<u32> {
+    use loro::TreeParentId;
+    let parent = match parent_id {
+        Some(s) => TreeParentId::Node(parse_tree_id(&s)?),
+        None => TreeParentId::Root,
+    };
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    Ok(tree.children_num(parent).unwrap_or(0) as u32)
+}
+
+/// All root-level node ids in the tree.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_roots(doc: ResourceArc<DocResource>, tree_id: String) -> NifResult<Vec<String>> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    Ok(tree.roots().into_iter().map(|id| id.to_string()).collect())
+}
+
+/// `true` if `node_id` is currently a live (non-deleted) node in the
+/// tree.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_contains(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    node_id: String,
+) -> NifResult<bool> {
+    let node = parse_tree_id(&node_id)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    Ok(tree.contains(node))
+}
+
+/// `true` if `node_id` was created and subsequently deleted.
+/// Errors with `:tree_node_not_found` if `node_id` never existed.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_is_node_deleted(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    node_id: String,
+) -> NifResult<bool> {
+    let node = parse_tree_id(&node_id)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    tree.is_node_deleted(&node).map_err(loro_err_to_nif)
+}
+
+/// Fractional index string for `node_id`, or `nil` if the tree was
+/// not configured to maintain fractional indexes.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_fractional_index(
+    doc: ResourceArc<DocResource>,
+    tree_id: String,
+    node_id: String,
+) -> NifResult<Option<String>> {
+    let node = parse_tree_id(&node_id)?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let tree = get_tree_handle(&guard, &tree_id);
+    Ok(tree.fractional_index(node))
+}
+
+/// Return the tree as a JSON string with each node's meta inlined.
+/// Distinct from `tree_get_nodes/2` which returns just the structural
+/// shape without the per-node metadata.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn tree_get_value_with_meta(doc: ResourceArc<DocResource>, tree_id: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let value = get_tree_handle(&guard, &tree_id).get_value_with_meta();
+    serde_json::to_string(&value).map_err(json_err_to_nif)
 }
 
 // ---------------------------------------------------------------------------
