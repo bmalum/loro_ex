@@ -41,10 +41,16 @@ defmodule LoroEx.Native do
   def new_doc, do: :erlang.nif_error(:nif_not_loaded)
   def new_doc_with_peer(_peer_id), do: :erlang.nif_error(:nif_not_loaded)
   def fork(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def fork_at(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
+  def from_snapshot(_bytes), do: :erlang.nif_error(:nif_not_loaded)
+  def peer_id(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def set_peer_id(_doc, _peer_id), do: :erlang.nif_error(:nif_not_loaded)
 
   # Sync primitives -----------------------------------------------------------
 
   def apply_update(_doc, _bytes), do: :erlang.nif_error(:nif_not_loaded)
+  def import_batch(_doc, _updates), do: :erlang.nif_error(:nif_not_loaded)
+  def decode_import_blob_meta(_bytes, _check_checksum), do: :erlang.nif_error(:nif_not_loaded)
   def export_snapshot(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def export_shallow_snapshot(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
   def export_updates_from(_doc, _version), do: :erlang.nif_error(:nif_not_loaded)
@@ -54,6 +60,24 @@ defmodule LoroEx.Native do
   def oplog_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def state_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def shallow_since_frontiers(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Doc introspection ---------------------------------------------------------
+
+  # credo:disable-for-next-line Credo.Check.Readability.PredicateFunctionNames
+  def is_shallow(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def has_container(_doc, _container_id), do: :erlang.nif_error(:nif_not_loaded)
+  def pending_txn_len(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def len_ops(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def len_changes(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def analyze(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def get_path_to_container(_doc, _container_id), do: :erlang.nif_error(:nif_not_loaded)
+  def get_deep_value_with_id(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Memory hygiene ------------------------------------------------------------
+
+  def free_history_cache(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def free_diff_calculator(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def compact_change_store(_doc), do: :erlang.nif_error(:nif_not_loaded)
 
   # Text (plain) --------------------------------------------------------------
 

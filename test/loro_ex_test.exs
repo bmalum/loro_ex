@@ -124,6 +124,167 @@ defmodule LoroExTest do
     end
   end
 
+  describe "doc introspection" do
+    @tag :nif
+    test "peer_id round-trips through set_peer_id" do
+      doc = LoroEx.new(123)
+      assert LoroEx.peer_id(doc) == 123
+      :ok = LoroEx.set_peer_id(doc, 456)
+      assert LoroEx.peer_id(doc) == 456
+    end
+
+    @tag :nif
+    test "is_shallow is false for a fresh doc" do
+      doc = LoroEx.new()
+      refute LoroEx.shallow?(doc)
+    end
+
+    @tag :nif
+    test "has_container returns true for any root name and existing nested CIDs" do
+      doc = LoroEx.new()
+      assert LoroEx.has_container(doc, "any-root-name")
+      :ok = LoroEx.map_set(doc, "m", "_init", ~s("seed"))
+      cid = LoroEx.map_insert_container(doc, "m", "child", :text)
+      assert LoroEx.has_container(doc, cid)
+      refute LoroEx.has_container(doc, "cid:99@99:Text")
+    end
+
+    @tag :nif
+    test "len_ops, len_changes, pending_txn_len reflect activity" do
+      doc = LoroEx.new()
+      assert LoroEx.len_ops(doc) == 0
+      assert LoroEx.len_changes(doc) == 0
+      assert LoroEx.pending_txn_len(doc) == 0
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "abc")
+      assert LoroEx.len_ops(doc) > 0
+      assert LoroEx.len_changes(doc) > 0
+      # mutations commit synchronously, so pending == 0 after the call
+      assert LoroEx.pending_txn_len(doc) == 0
+    end
+
+    @tag :nif
+    test "analyze reports each touched container" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("dark"))
+
+      json = LoroEx.analyze(doc)
+      assert {:ok, %{"containers" => containers}} = Jason.decode(json)
+      cids = Map.keys(containers)
+      assert "cid:root-body:Text" in cids
+      assert "cid:root-settings:Map" in cids
+
+      info = containers["cid:root-body:Text"]
+      assert is_integer(info["size"])
+      assert is_integer(info["depth"])
+      assert is_integer(info["ops_num"])
+      assert is_boolean(info["dropped"])
+    end
+
+    @tag :nif
+    test "get_path_to_container returns root → child path" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "m", "_init", ~s("seed"))
+      cid = LoroEx.map_insert_container(doc, "m", "child", :text)
+
+      assert {:ok, path} = doc |> LoroEx.get_path_to_container(cid) |> Jason.decode()
+
+      # Loro returns the full path from doc root: each hop is
+      # [container_cid, index_into_that_container]. The last hop's
+      # cid is the target itself, reached via key "child".
+      assert is_list(path)
+      refute path == []
+      [last_cid, last_index] = List.last(path)
+      assert last_cid == cid
+      assert last_index == "child"
+    end
+
+    @tag :nif
+    test "get_path_to_container returns null for unknown CID" do
+      doc = LoroEx.new()
+      assert "null" == LoroEx.get_path_to_container(doc, "cid:99@99:Text")
+    end
+
+    @tag :nif
+    test "get_deep_value_with_id includes container ids alongside values" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+
+      json = LoroEx.get_deep_value_with_id(doc)
+      assert {:ok, decoded} = Jason.decode(json)
+      assert %{"body" => body} = decoded
+      assert %{"value" => "hi", "cid" => cid_descriptor} = body
+      assert is_binary(cid_descriptor)
+    end
+  end
+
+  describe "memory hygiene" do
+    @tag :nif
+    test "free_history_cache, free_diff_calculator, compact_change_store all return :ok" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "abcdef")
+      assert :ok = LoroEx.free_history_cache(doc)
+      assert :ok = LoroEx.free_diff_calculator(doc)
+      assert :ok = LoroEx.compact_change_store(doc)
+      # Doc still usable afterwards
+      assert LoroEx.get_text(doc, "body") == "abcdef"
+    end
+  end
+
+  describe "lifecycle helpers" do
+    @tag :nif
+    test "from_snapshot constructs a doc identical to the source" do
+      a = LoroEx.new(1)
+      :ok = LoroEx.insert_text(a, "body", 0, "hello")
+      snap = LoroEx.export_snapshot(a)
+
+      b = LoroEx.from_snapshot(snap)
+      assert LoroEx.get_text(b, "body") == "hello"
+    end
+
+    @tag :nif
+    test "fork_at observes only the history up to a frontier" do
+      doc = LoroEx.new(1)
+      :ok = LoroEx.insert_text(doc, "body", 0, "first")
+      frontier = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 5, "_after")
+
+      forked = LoroEx.fork_at(doc, frontier)
+      assert LoroEx.get_text(doc, "body") == "first_after"
+      assert LoroEx.get_text(forked, "body") == "first"
+    end
+
+    @tag :nif
+    test "import_batch applies multiple updates atomically" do
+      a = LoroEx.new(1)
+      :ok = LoroEx.insert_text(a, "body", 0, "alpha")
+      snap1 = LoroEx.export_snapshot(a)
+
+      :ok = LoroEx.insert_text(a, "body", 5, " beta")
+      delta = LoroEx.export_updates(a, LoroEx.oplog_version(LoroEx.new()))
+
+      b = LoroEx.new(2)
+      :ok = LoroEx.import_batch(b, [snap1, delta])
+      assert LoroEx.get_text(b, "body") == "alpha beta"
+    end
+
+    @tag :nif
+    test "decode_import_blob_meta returns mode and size hints" do
+      a = LoroEx.new(1)
+      :ok = LoroEx.insert_text(a, "body", 0, "hi")
+      snap = LoroEx.export_snapshot(a)
+
+      json = LoroEx.decode_import_blob_meta(snap)
+      assert {:ok, meta} = Jason.decode(json)
+      assert meta["is_snapshot"] == true
+      assert meta["mode"] == "snapshot"
+      assert is_integer(meta["change_num"])
+      assert meta["partial_end_vv_size"] >= 1
+    end
+  end
+
   describe "movable tree" do
     @tag :nif
     test "concurrent moves converge without cycle" do

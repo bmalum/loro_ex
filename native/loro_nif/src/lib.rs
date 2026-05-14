@@ -369,6 +369,44 @@ fn fork(doc: ResourceArc<DocResource>) -> NifResult<ResourceArc<DocResource>> {
     Ok(ResourceArc::new(DocResource::new(forked)))
 }
 
+/// Fork the doc at a specific frontier. Like `fork/1` but the clone
+/// observes only the history up to `frontier`, not the parent's
+/// current state.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn fork_at(doc: ResourceArc<DocResource>, frontier: Binary) -> NifResult<ResourceArc<DocResource>> {
+    let frontiers = Frontiers::decode(frontier.as_slice())
+        .map_err(|e| NifError::Term(Box::new((atoms::invalid_frontier(), format!("{e:?}")))))?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let forked = guard.fork_at(&frontiers).map_err(loro_err_to_nif)?;
+    drop(guard);
+    Ok(ResourceArc::new(DocResource::new(forked)))
+}
+
+/// Construct a fresh doc and import a snapshot in one call. Cheaper
+/// than `new/0` followed by `apply_update/2` because the snapshot is
+/// loaded directly into the doc's initial state.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn from_snapshot(bytes: Binary) -> NifResult<ResourceArc<DocResource>> {
+    let doc = LoroDoc::from_snapshot(bytes.as_slice()).map_err(loro_err_to_nif)?;
+    Ok(ResourceArc::new(DocResource::new(doc)))
+}
+
+/// Return the doc's current peer id.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn peer_id(doc: ResourceArc<DocResource>) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.peer_id())
+}
+
+/// Replace the doc's peer id at runtime. Errors with `:invalid_peer_id`
+/// if `peer_id` is the reserved `PeerID::MAX` value.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn set_peer_id(doc: ResourceArc<DocResource>, peer_id: u64) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.set_peer_id(peer_id).map_err(loro_err_to_nif)?;
+    Ok(atoms::ok())
+}
+
 // ---------------------------------------------------------------------------
 // Sync primitives
 // ---------------------------------------------------------------------------
@@ -378,6 +416,43 @@ fn apply_update(doc: ResourceArc<DocResource>, update: Binary) -> NifResult<Atom
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     guard.import(update.as_slice()).map_err(loro_err_to_nif)?;
     Ok(atoms::ok())
+}
+
+/// Apply a batch of updates atomically. Acquires the doc mutex once
+/// for the whole batch and emits a single commit, which is faster than
+/// looping `apply_update/2` when replaying a queue of updates.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn import_batch(doc: ResourceArc<DocResource>, updates: Vec<Binary>) -> NifResult<Atom> {
+    let owned: Vec<Vec<u8>> = updates.iter().map(|b| b.as_slice().to_vec()).collect();
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.import_batch(&owned).map_err(loro_err_to_nif)?;
+    Ok(atoms::ok())
+}
+
+/// Inspect the metadata of a snapshot or update blob without
+/// importing it. Useful for auth, quota, and corruption checks before
+/// committing the bytes to a doc.
+///
+/// Returns a JSON string with fields:
+///   * `mode` — `"snapshot" | "shallow-snapshot" | "update" | "outdated-snapshot" | "outdated-update"`
+///   * `is_snapshot` — bool
+///   * `start_timestamp`, `end_timestamp` — i64 unix timestamps (0 if unrecorded)
+///   * `change_num` — number of changes encoded
+///   * `partial_start_vv_size`, `partial_end_vv_size` — peer-id counts in the partial vvs
+#[rustler::nif(schedule = "DirtyCpu")]
+fn decode_import_blob_meta(bytes: Binary, check_checksum: bool) -> NifResult<String> {
+    let meta = LoroDoc::decode_import_blob_meta(bytes.as_slice(), check_checksum)
+        .map_err(loro_err_to_nif)?;
+    let json = serde_json::json!({
+        "mode": format!("{}", meta.mode),
+        "is_snapshot": meta.mode.is_snapshot(),
+        "start_timestamp": meta.start_timestamp,
+        "end_timestamp": meta.end_timestamp,
+        "change_num": meta.change_num,
+        "partial_start_vv_size": meta.partial_start_vv.iter().count() as u64,
+        "partial_end_vv_size": meta.partial_end_vv.iter().count() as u64,
+    });
+    serde_json::to_string(&json).map_err(json_err_to_nif)
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -491,6 +566,151 @@ fn state_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
 fn shallow_since_frontiers(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     bytes_to_owned_binary(&guard.shallow_since_frontiers().encode())
+}
+
+// ---------------------------------------------------------------------------
+// Doc introspection
+// ---------------------------------------------------------------------------
+
+/// `true` if the doc is a shallow doc (history before
+/// `shallow_since_vv` has been trimmed).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn is_shallow(doc: ResourceArc<DocResource>) -> NifResult<bool> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.is_shallow())
+}
+
+/// `true` if the given container exists in this doc. Root container
+/// names always return `true` (Loro materializes roots lazily on
+/// first access). For nested containers, returns `true` only if the
+/// CID exists in the doc state.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn has_container(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<bool> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(match try_parse_container_id(&container_id) {
+        Some(cid) => guard.has_container(&cid),
+        // Root names — Loro treats every well-formed root as present.
+        None => true,
+    })
+}
+
+/// Number of ops queued in the pending transaction (uncommitted).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn pending_txn_len(doc: ResourceArc<DocResource>) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.get_pending_txn_len() as u64)
+}
+
+/// Total number of ops in the op log (committed).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn len_ops(doc: ResourceArc<DocResource>) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.len_ops() as u64)
+}
+
+/// Total number of changes (op-batches) in the op log.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn len_changes(doc: ResourceArc<DocResource>) -> NifResult<u64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.len_changes() as u64)
+}
+
+/// Return doc analysis as a JSON string. Shape:
+///
+/// ```json
+/// {
+///   "containers": {
+///     "<cid>": { "size": u32, "depth": u32, "ops_num": u32,
+///                "dropped": bool, "last_edit_time": i64 }
+///   }
+/// }
+/// ```
+#[rustler::nif(schedule = "DirtyCpu")]
+fn analyze(doc: ResourceArc<DocResource>) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let analysis = guard.analyze();
+    let mut containers = serde_json::Map::with_capacity(analysis.containers.len());
+    for (cid, info) in &analysis.containers {
+        containers.insert(
+            cid.to_string(),
+            serde_json::json!({
+                "size": info.size,
+                "depth": info.depth,
+                "ops_num": info.ops_num,
+                "dropped": info.dropped,
+                "last_edit_time": info.last_edit_time,
+            }),
+        );
+    }
+    serde_json::to_string(&serde_json::json!({"containers": containers})).map_err(json_err_to_nif)
+}
+
+/// Return the path from root to the given container as a JSON array
+/// of `[cid, index]` pairs. `index` is either a string (map key /
+/// tree node id) or an integer (list/movable-list position).
+///
+/// Returns `null` if the container does not exist.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_path_to_container(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<String> {
+    let cid = match try_parse_container_id(&container_id) {
+        Some(c) => c,
+        None => {
+            return Ok("null".to_string());
+        }
+    };
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    match guard.get_path_to_container(&cid) {
+        Some(path) => {
+            let arr: Vec<serde_json::Value> = path
+                .into_iter()
+                .map(|(cid, idx)| serde_json::json!([cid.to_string(), index_to_json(&idx)]))
+                .collect();
+            serde_json::to_string(&serde_json::Value::Array(arr)).map_err(json_err_to_nif)
+        }
+        None => Ok("null".to_string()),
+    }
+}
+
+/// Like `get_map_json` / `list_get_json` at the doc root, but each
+/// container in the returned tree is wrapped with its container id.
+/// Useful for block-tree introspection where the caller needs CIDs to
+/// drive subsequent writes.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_deep_value_with_id(doc: ResourceArc<DocResource>) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let value = guard.get_deep_value_with_id();
+    serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+// ---------------------------------------------------------------------------
+// Memory hygiene
+// ---------------------------------------------------------------------------
+
+/// Drop the cached history index. The doc still works correctly; the
+/// next history-traversing op rebuilds the index lazily.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn free_history_cache(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.free_history_cache();
+    Ok(atoms::ok())
+}
+
+/// Drop the cached structured-diff calculator. Same caveat as
+/// `free_history_cache/1` — the next diff-emitting op rebuilds it.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn free_diff_calculator(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.free_diff_calculator();
+    Ok(atoms::ok())
+}
+
+/// Compact the change store, releasing unused capacity. Cheap to call
+/// periodically on long-lived doc handles.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn compact_change_store(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.compact_change_store();
+    Ok(atoms::ok())
 }
 
 // ---------------------------------------------------------------------------
