@@ -285,6 +285,65 @@ defmodule LoroExTest do
     end
   end
 
+  describe "revert_to" do
+    @tag :nif
+    test "rewinds a single text edit" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+      checkpoint = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 5, " world")
+      assert LoroEx.get_text(doc, "body") == "hello world"
+
+      :ok = LoroEx.revert_to(doc, checkpoint)
+      assert LoroEx.get_text(doc, "body") == "hello"
+    end
+
+    @tag :nif
+    test "rewinds across multiple containers" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("light"))
+      checkpoint = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 2, "!")
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("dark"))
+
+      :ok = LoroEx.revert_to(doc, checkpoint)
+      assert LoroEx.get_text(doc, "body") == "hi"
+      assert LoroEx.map_get_json(doc, "settings", "theme") == ~s("light")
+    end
+
+    @tag :nif
+    test "produces inverse ops that sync to peers" do
+      a = LoroEx.new(1)
+      b = LoroEx.new(2)
+
+      :ok = LoroEx.insert_text(a, "body", 0, "shared")
+      :ok = LoroEx.apply_update(b, LoroEx.export_snapshot(a))
+      checkpoint = LoroEx.oplog_frontiers(a)
+
+      :ok = LoroEx.insert_text(a, "body", 6, " extra")
+      :ok = LoroEx.apply_update(b, LoroEx.export_snapshot(a))
+      assert LoroEx.get_text(b, "body") == "shared extra"
+
+      # A reverts; the inverse op syncs to B.
+      :ok = LoroEx.revert_to(a, checkpoint)
+      :ok = LoroEx.apply_update(b, LoroEx.export_snapshot(a))
+
+      assert LoroEx.get_text(a, "body") == "shared"
+      assert LoroEx.get_text(b, "body") == "shared"
+    end
+
+    @tag :nif
+    test "errors with :invalid_frontier on malformed input" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+
+      assert {:error, {:invalid_frontier, _}} = LoroEx.revert_to(doc, <<>>)
+    end
+  end
+
   describe "movable list" do
     @tag :nif
     test "push, length, get_json round-trip" do

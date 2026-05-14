@@ -378,6 +378,40 @@ defmodule LoroEx do
     do: Native.decode_import_blob_meta(bytes, check_checksum)
 
   @doc """
+  Rewind the doc to a previous frontier by emitting **new ops** that
+  invert the changes since that point.
+
+  This is **not** a checkout. `revert_to/2` produces forward-
+  compatible inverse ops, which means:
+
+    * the inverse ops sync to peers like any other edit
+    * subscription callbacks fire for them
+    * `UndoManager` tracks them — calling undo re-applies the original
+      edits
+
+  Returns `{:error, {:invalid_frontier, _}}` if the frontier doesn't
+  decode, or `{:error, {reason, _}}` for `:not_found` /
+  `:incompatible_version` when the frontier references ops the doc
+  doesn't have.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+      checkpoint = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 5, " world")
+      LoroEx.get_text(doc, "body")
+      # => "hello world"
+
+      :ok = LoroEx.revert_to(doc, checkpoint)
+      LoroEx.get_text(doc, "body")
+      # => "hello"
+  """
+  @spec revert_to(doc(), frontier()) :: :ok | error()
+  defdelegate revert_to(doc, frontier), to: Native
+
+  @doc """
   Export the entire document state as a self-contained snapshot.
 
   The returned binary is a **full** snapshot: every op, every
