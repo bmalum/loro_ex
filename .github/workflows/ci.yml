@@ -49,6 +49,10 @@ jobs:
         with:
           otp-version: "27.2"
           elixir-version: "1.18.2"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/loro_nif
       - uses: actions/cache@v4
         with:
           path: |
@@ -68,6 +72,10 @@ jobs:
         with:
           otp-version: "27.2"
           elixir-version: "1.18.2"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/loro_nif
       - uses: actions/cache@v4
         with:
           path: |
@@ -154,6 +162,10 @@ jobs:
         with:
           otp-version: "27.2"
           elixir-version: "1.18.2"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/loro_nif
       - uses: actions/cache@v4
         with:
           path: |

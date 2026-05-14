@@ -1,0 +1,74 @@
+name: Build precompiled NIF artifacts
+
+# Triggered on tag push (vN.N.N). Builds the loro_nif crate for each
+# supported target, uploads the .so to the GitHub Release, and the
+# rustler_precompiled action also generates a checksum entry consumers
+# verify against.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build artifacts for (e.g. v0.9.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build_release:
+    name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }} (${{ matrix.job.os }})
+    runs-on: ${{ matrix.job.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        nif: ["2.17"]
+        job:
+          - { target: aarch64-apple-darwin,        os: macos-14 }
+          - { target: x86_64-apple-darwin,         os: macos-13 }
+          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-22.04, use-cross: true }
+          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-22.04 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract project info
+        id: project
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: philss/rustler-precompiled-action@v1.1.4
+        id: build-crate
+        with:
+          project-name: loro_nif
+          project-version: ${{ steps.project.outputs.version }}
+          target: ${{ matrix.job.target }}
+          nif-version: ${{ matrix.nif }}
+          use-cross: ${{ matrix.job.use-cross == true }}
+          project-dir: "native/loro_nif"
+
+      - name: Artifact summary
+        shell: bash
+        run: |
+          echo "Built artifact:"
+          ls -lh "${{ steps.build-crate.outputs.file-path }}"
+          shasum -a 256 "${{ steps.build-crate.outputs.file-path }}"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.project.outputs.tag }}
+          files: ${{ steps.build-crate.outputs.file-path }}
+          fail_on_unmatched_files: true

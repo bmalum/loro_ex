@@ -2,16 +2,16 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/elixir-~%3E%201.17-purple.svg)](https://elixir-lang.org)
-[![Rust](https://img.shields.io/badge/rust-stable%20(%E2%89%A5%201.91)-orange.svg)](https://www.rust-lang.org)
 [![Loro](https://img.shields.io/badge/loro-1.12-green.svg)](https://loro.dev)
 
 Elixir bindings for the [Loro](https://loro.dev) CRDT library, via a
 [Rustler](https://github.com/rusterlium/rustler) NIF.
 
 LoroEx exposes Loro's document model — text with Peritext formatting,
-maps, lists, and a movable block tree — to Elixir, so you can build
-collaborative editors, offline-first mobile backends, or multiplayer
-server-side state without reinventing merge logic.
+maps, lists, movable lists, a movable block tree, and counters — to
+Elixir, so you can build collaborative editors, offline-first mobile
+backends, or multiplayer server-side state without reinventing merge
+logic.
 
 It's factored as a standalone library so the NIF can evolve on its own
 cadence: independent Rust toolchain, Loro version bumps, precompiled
@@ -21,62 +21,107 @@ artifact publishing.
 
 ## Table of contents
 
-- [What is Loro?](#what-is-loro)
-- [Why Loro over Yjs / Automerge?](#why-loro-over-yjs--automerge)
-- [How Loro works (short version)](#how-loro-works-short-version)
-- [Installation](#installation)
 - [Quick start](#quick-start)
+- [Installation](#installation)
+- [Why Loro](#why-loro-vs-yjs--automerge)
+- [Concepts](#concepts)
 - [Guides](#guides)
-- [API overview](#api-overview)
-- [Architecture & invariants](#architecture--invariants)
+- [Documentation](#documentation)
 - [Building from source](#building-from-source)
 - [Testing](#testing)
-- [Project layout](#project-layout)
-- [Roadmap](#roadmap)
+- [Project status & roadmap](#project-status--roadmap)
 - [Contributing](#contributing)
 - [License](#license)
 
 ---
 
-## What is Loro?
+## Quick start
 
-[Loro](https://loro.dev) is a high-performance CRDT (Conflict-free
-Replicated Data Type) framework, written in Rust with bindings for
-JavaScript (WASM) and Swift. CRDTs are data structures that can be
-replicated across multiple peers and updated independently; they
-guarantee that all replicas converge to the same state once they've
-exchanged the same set of operations, **regardless of the order those
-operations arrive**.
+```elixir
+# Add to your mix.exs deps:
+{:loro_ex, git: "https://github.com/bmalum/loro_ex.git", tag: "v0.8.0"}
+```
 
-In practical terms that's the mathematics that lets Google Docs,
-Figma, Linear, or Notion support live collaboration without a lock
-server, and lets the same app keep working offline and merge back in
-when it reconnects.
+```elixir
+# Create a doc and edit a text container.
+doc = LoroEx.new()
+:ok = LoroEx.insert_text(doc, "body", 0, "hello, world")
+LoroEx.get_text(doc, "body")
+# => "hello, world"
 
-Loro in particular focuses on:
+# Sync with another peer via a snapshot.
+snap  = LoroEx.export_snapshot(doc)
+other = LoroEx.new()
+:ok   = LoroEx.apply_update(other, snap)
+LoroEx.get_text(other, "body")
+# => "hello, world"
 
-- **Rich text with Peritext semantics.** Formatting (bold, links,
-  mentions) is preserved faithfully across concurrent edits — no mark
-  split at insertion points, no "bold leaked over the linebreak."
-- **Movable tree.** You can represent a block-based document (like a
-  Notion page — nested toggles, columns, callouts) as a tree and allow
-  concurrent moves without cycles, without losing nodes, and with a
-  deterministic conflict winner. Pure-text CRDTs can't express this.
-- **Time travel & version control.** A Loro doc keeps enough history to
-  check out any previous state, export a shallow "starting-point"
-  snapshot, or diff two versions.
-- **Fast.** Orders of magnitude faster than earlier Rust CRDT libraries
-  on typical editing benchmarks, thanks to an RLE-encoded op log and a
-  column-oriented storage format.
+# Incremental sync: ship only the delta since the other side's version.
+v = LoroEx.oplog_version(other)
+:ok = LoroEx.insert_text(doc, "body", 12, "!")
+delta = LoroEx.export_updates(doc, v)
+:ok = LoroEx.apply_update(other, delta)
+LoroEx.get_text(other, "body")
+# => "hello, world!"
+```
 
-Loro is pre-1.0 by culture but 1.x by version number — the on-disk
-format is stable, but the API still gets refactors between minors. This
-library pins Loro exactly in `Cargo.toml` and bumps deliberately.
+A movable block tree (Notion-style nested blocks):
 
-## Why Loro over Yjs / Automerge?
+```elixir
+doc = LoroEx.new()
+page  = LoroEx.tree_create_node(doc, "blocks", nil)
+intro = LoroEx.tree_create_node(doc, "blocks", page)
+body  = LoroEx.tree_create_node(doc, "blocks", page)
 
-CRDT choice is mostly about which features you need and how much upfront
-integration work you can afford.
+:ok = LoroEx.tree_move_node(doc, "blocks", intro, body, 0)
+
+LoroEx.tree_children(doc, "blocks", body)
+# => [intro_id]
+```
+
+## Installation
+
+Add LoroEx as a git dependency in your `mix.exs`:
+
+```elixir
+def deps do
+  [
+    {:loro_ex,
+     git: "https://github.com/bmalum/loro_ex.git",
+     tag: "v0.8.0"}
+  ]
+end
+```
+
+Or, during local development, point at a checkout:
+
+```elixir
+def deps do
+  [{:loro_ex, path: "../loro_ex"}]
+end
+```
+
+### Precompiled NIFs (0.9.0+)
+
+Starting with **0.9.0**, LoroEx ships precompiled NIF artifacts for the
+common targets, so you don't need a Rust toolchain to install:
+
+| Target triple | Who it serves |
+|---|---|
+| `aarch64-apple-darwin` | Apple Silicon Mac (M1/M2/M3) |
+| `x86_64-apple-darwin` | Intel Mac |
+| `aarch64-unknown-linux-gnu` | ARM Linux (Graviton, Hetzner ARM, Pi) |
+| `x86_64-unknown-linux-gnu` | AMD64 Linux (most cloud, Intel/AMD servers) |
+
+Linux artifacts are built against glibc 2.31 (Debian 11+, Ubuntu 20.04+).
+Windows is not yet a target — open an issue if you need it.
+
+If your platform isn't in the matrix, or you want to debug NIF code
+locally, set `FORCE_LORO_EX_BUILD=1` to fall back to a source build.
+Source builds need a recent Rust toolchain — see
+[Building from source](#building-from-source).
+
+## Why Loro vs Yjs / Automerge
 
 |                         | Yjs               | Automerge         | **Loro**          |
 |-------------------------|-------------------|-------------------|-------------------|
@@ -89,112 +134,31 @@ integration work you can afford.
 | Editor integrations     | Many              | Few               | TipTap, ProseMirror, CodeMirror |
 
 For a Notion-shaped product the Peritext + movable-tree combination is
-hard to give up. The cost is Phase-1 week of NIF work that doesn't exist
-with Yjs (which has a mature Elixir port).
+hard to give up. The cost is a week of NIF integration work; LoroEx
+absorbs that for you.
 
-## How Loro works (short version)
+## Concepts
 
 A Loro document is a **container forest** — a tree of containers, each
 of which is one of:
 
-- **`Text`** — a sequence of characters with Peritext-style formatting
-- **`Map`** — a key/value store (JSON-ish)
-- **`List`** / **`MovableList`** — ordered sequences
-- **`Tree`** — a hierarchical tree of nodes, each with a metadata map,
-  supporting concurrent moves without cycles (the feature we care about)
+- **`Text`** — a sequence of characters with Peritext formatting
+- **`Map`** — a key/value store
+- **`List`** / **`MovableList`** — ordered sequences (the movable
+  variant preserves element identity across moves)
+- **`Tree`** — a hierarchical tree of nodes with metadata maps,
+  supporting concurrent moves without cycles
+- **`Counter`** — a sum-CRDT (added in 0.9.0)
 
-Every edit produces an **operation** with a unique id
-`(peer_id, counter)`. Operations are stored in an **oplog** — an
-append-only log per peer. The oplog is the source of truth; all
-document state is derivable from it.
+Every edit produces an **operation** with a unique id `(peer_id, counter)`,
+appended to a per-peer **op log**. Peers exchange state by encoding a
+**version vector** and pulling the operations the other side is missing.
+The on-disk format is columnar and RLE-compressed so typical sync
+payloads are small.
 
-Peers exchange state by encoding a **version vector** (the set of ops
-each peer has seen) and pulling the operations the other side is
-missing. Loro's wire format is columnar + RLE-compressed, so typical
-sync payloads are small.
-
-The magic that makes the movable tree work is called a
-**Tree CRDT with undo** — concurrent moves are detected by comparing
-op ids, and cycles are broken by un-doing the lower-priority move
-locally while keeping the op in the log for convergence. See Loro's
-[docs on the movable tree](https://loro.dev/docs/tutorial/tree) for
-the full algorithm; our design doc covers the invariants we rely on.
-
-## Installation
-
-LoroEx isn't on hex.pm yet. Add it as a git dependency in your
-application's `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:loro_ex,
-     git: "https://github.com/bmalum/loro_ex.git",
-     tag: "v0.8.0"}
-  ]
-end
-```
-
-Or, during development, point at a local checkout:
-
-```elixir
-def deps do
-  [{:loro_ex, path: "../loro_ex"}]
-end
-```
-
-> **NIF compilation requires a Rust toolchain (stable, ≥ 1.91).**
-> See [Building from source](#building-from-source) for details. Once we
-> publish signed precompiled NIFs via `rustler_precompiled`, consumers
-> won't need Rust on their machines.
-
-## Quick start
-
-```elixir
-# Create a doc
-doc = LoroEx.new()
-
-# Edit a text container
-:ok = LoroEx.insert_text(doc, "body", 0, "hello, ")
-:ok = LoroEx.insert_text(doc, "body", 7, "world")
-LoroEx.get_text(doc, "body")
-# => "hello, world"
-
-# Export the current state as a self-contained snapshot
-snapshot = LoroEx.export_snapshot(doc)
-
-# Create a second doc and sync
-other = LoroEx.new()
-:ok = LoroEx.apply_update(other, snapshot)
-LoroEx.get_text(other, "body")
-# => "hello, world"
-
-# Incremental sync: export only the delta since the other side's version
-version = LoroEx.oplog_version(other)
-:ok = LoroEx.insert_text(doc, "body", 12, "!")
-delta = LoroEx.export_updates(doc, version)
-:ok = LoroEx.apply_update(other, delta)
-LoroEx.get_text(other, "body")
-# => "hello, world!"
-```
-
-### Movable tree example
-
-```elixir
-doc = LoroEx.new()
-
-# Create three nodes, nest them
-page_id = LoroEx.tree_create_node(doc, "blocks", nil)
-intro_id = LoroEx.tree_create_node(doc, "blocks", page_id)
-body_id = LoroEx.tree_create_node(doc, "blocks", page_id)
-
-# Move intro to be a child of body
-:ok = LoroEx.tree_move_node(doc, "blocks", intro_id, body_id, 0)
-
-# Inspect
-LoroEx.tree_get_nodes(doc, "blocks")
-# => JSON string with the full tree structure
-```
+For the algorithmic detail, see Loro's
+[official docs](https://loro.dev/docs); for the invariants this
+binding relies on, see [`docs/design.md`](docs/design.md).
 
 ## Guides
 
@@ -209,111 +173,24 @@ Task-oriented tutorials with runnable examples:
 
 Generate them locally as HTML with `mix docs`.
 
-## API overview
+## Documentation
 
-The full API is documented in the modules themselves; `mix docs`
-generates HTML. High-level surface:
+The full API is documented in the modules themselves; run `mix docs`
+to generate HTML, or browse the source:
 
-### Lifecycle
-- `LoroEx.new/0` — new doc with random peer id
-- `LoroEx.new/1` — new doc with explicit peer id (deterministic tests)
-- `LoroEx.fork/1`, `LoroEx.fork_at/2` — independent clones (live state / at frontier)
-- `LoroEx.from_snapshot/1` — one-shot construct + import
-- `LoroEx.peer_id/1`, `LoroEx.set_peer_id/2` — runtime peer-id getter/setter
+- `LoroEx` — the friendly Elixir API (lifecycle, sync, containers,
+  cursors, time travel, JSON-path)
+- `LoroEx.UndoManager` — per-peer undo history
+- `LoroEx.Presence` — ephemeral KV with TTL for cursors and selections
+- `LoroEx.Native` — the raw NIF bindings (prefer the friendly API)
 
-### Sync primitives
-- `LoroEx.apply_update/2`, `LoroEx.import_batch/2` — single & batch imports
-- `LoroEx.export_snapshot/1`, `LoroEx.export_shallow_snapshot/2`, `LoroEx.export_updates/2`
-- `LoroEx.oplog_version/1`, `state_vector/1` — opaque version vectors
-- `LoroEx.oplog_frontiers/1`, `state_frontiers/1`, `shallow_since_frontiers/1` — opaque frontiers
-- `LoroEx.containers_touched_since/2` — diff-scope CIDs since a version
-- `LoroEx.decode_import_blob_meta/2` — peek at a blob without importing
-- `LoroEx.revert_to/2` — emit inverse ops to rewind to a frontier
-
-### Doc introspection & memory hygiene
-- `LoroEx.shallow?/1`, `LoroEx.has_container/2`, `LoroEx.pending_txn_len/1`
-- `LoroEx.len_ops/1`, `LoroEx.len_changes/1`, `LoroEx.analyze/1`
-- `LoroEx.get_path_to_container/2`, `LoroEx.get_deep_value_with_id/1`
-- `LoroEx.free_history_cache/1`, `LoroEx.free_diff_calculator/1`,
-  `LoroEx.compact_change_store/1`
-
-### Text containers — plain
-- `LoroEx.get_text/2`, `insert_text/4`, `delete_text/4`
-- `LoroEx.text_len/3` — count in `:unicode | :utf8 | :utf16`
-- `LoroEx.text_convert_pos/5` — translate between unit systems
-
-### Text containers — rich text (Peritext)
-- `LoroEx.text_mark/6`, `text_unmark/5` — apply and remove marks
-- `LoroEx.text_to_delta/2`, `text_apply_delta/3` — Quill-compatible deltas
-- `LoroEx.text_get_richtext_value/2` — decoded segment list
-
-### Cursors (stable positions)
-- `LoroEx.text_get_cursor/4`, `list_get_cursor/4`,
-  `movable_list_get_cursor/4` — produce an opaque cursor
-- `LoroEx.cursor_resolve/2` — resolve a cursor to its current `{pos, side}`
-
-### Map containers
-- `LoroEx.get_map_json/2`, `map_set/4`, `map_delete/3`, `map_get_json/3`
-- `LoroEx.map_insert_container/4` — nest a text/map/list/movable_list
-
-### List containers
-- `LoroEx.list_get_json/2`, `list_push/3`, `list_delete/4`
-- `LoroEx.list_insert_container/4`
-
-### Movable list
-- `LoroEx.movable_list_*` — full surface (push/insert/delete/set/move/pop/clear)
-  plus per-element peer attribution (`get_creator_at`, `get_last_mover_at`,
-  `get_last_editor_at`)
-
-### Movable tree
-- Mutations: `LoroEx.tree_create_node/3`, `tree_move_node/5`, `tree_delete_node/3`
-- Queries: `LoroEx.tree_parent/3`, `tree_children/3`, `tree_roots/2`,
-  `tree_contains/3`, `tree_is_node_deleted/3`, `tree_fractional_index/3`,
-  `tree_children_num/3`
-- Read: `LoroEx.tree_get_nodes/2`, `tree_get_value_with_meta/2`,
-  `tree_get_meta/3`
-
-### Undo / redo
-`LoroEx.UndoManager` — per-peer undo history. See the
-[Undo guide](docs/guides/undo.md).
-
-### Presence / awareness
-`LoroEx.Presence` — ephemeral KV with TTL for cursors, selections,
-typing indicators. See the
-[Presence & cursors guide](docs/guides/presence_and_cursors.md).
-
-### Subscriptions
-- `LoroEx.subscribe/2` — raw local-update bytes for sync
-- `LoroEx.subscribe_container/3` — structured diff events per container
-- `LoroEx.subscribe_root/2` — structured diff events across the whole doc
-- `LoroEx.unsubscribe/1` — eager cancellation
-
-## Architecture & invariants
-
-See [`docs/design.md`](docs/design.md) for the full treatment. The five
-non-negotiable rules:
-
-1. **Every NIF is `DirtyCpu`-scheduled.** Loro operations on non-trivial
-   docs take tens of milliseconds, which would starve a normal BEAM
-   scheduler and stutter the whole VM.
-2. **`Mutex<LoroDoc>`, not `RwLock`.** Writes are the hot path; there's
-   no pure-reader hot path to benefit from concurrent reads.
-3. **`OwnedBinary` for returned bytes.** Saves a copy from Rust heap
-   into the BEAM heap.
-4. **Version vectors are opaque binaries.** Loro has three related
-   version types (`oplog_vv`, `state_vv`, `Frontiers`); they are not
-   interchangeable. We pass them as binaries produced by `encode()`
-   and decoded inside Rust so Elixir callers can't mix them up.
-5. **Subscription callbacks never re-enter the doc.** Callbacks send
-   bytes to a pid via message passing; they must not acquire the doc
-   mutex, or a nested `import` call path will deadlock.
-
-Concurrency model: pass doc handles between Elixir processes all you
-want, but mutations serialize on the internal mutex. Expected usage is
-**one GenServer per doc** that owns the handle, with all mutations
-flowing through that GenServer's mailbox.
+For architectural invariants (mutex strategy, scheduler choice,
+subscription contract) see [`docs/design.md`](docs/design.md).
 
 ## Building from source
+
+You only need this section if your platform isn't in the prebuilt
+matrix or you set `FORCE_LORO_EX_BUILD=1`.
 
 ### Prerequisites
 
@@ -329,12 +206,6 @@ first on `PATH`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-Or on every Mix invocation:
-
-```bash
-PATH="$HOME/.cargo/bin:$PATH" mix compile
 ```
 
 ### Build
@@ -361,90 +232,67 @@ iex> LoroEx.get_text(doc, "body")
 
 ## Testing
 
-Tests that actually load the NIF are tagged `:nif`. They're excluded
-from the default `mix test` run so CI jobs on a machine without Rust
-can still verify the pure-Elixir wrapper compiles:
+Tests that load the NIF are tagged `:nif`. They're excluded from the
+default `mix test` run so CI jobs on a machine without Rust can still
+verify the pure-Elixir wrapper compiles:
 
 ```bash
 # Pure-Elixir tests only
 mix test
 
-# NIF-backed acceptance tests
+# NIF-backed acceptance + unit tests
 mix test --only nif
 
-# Both
+# Everything (includes :nif)
 mix test --include nif
+
+# Property-based convergence tests (slower; 0.9.0+)
+mix test --include nif --include property
 ```
 
-Three Phase-1 acceptance tests currently pass and gate the NIF work
-being "done":
+CI runs `mix format --check-formatted`, `mix credo --strict`,
+`cargo fmt --check`, `cargo clippy -D warnings`, `mix dialyzer`,
+`mix docs` (with warnings-as-errors), and `mix test --include nif`
+on every PR.
 
-1. **Convergence** — two docs exchange snapshots and reach the same
-   text.
-2. **Delta < snapshot** — for a shared baseline plus a small server
-   edit, the delta is smaller than a full snapshot.
-3. **Concurrent tree moves** — Alice moves A under B, Bob concurrently
-   moves B under A; after sync both sides converge to the same tree
-   with no cycle and a deterministic winner.
+## Project status & roadmap
 
-## Project layout
+LoroEx is **production-ready for early adopters**: the NIF surface is
+stable and 100% of Loro's container types are wrapped, but the public
+Elixir API still gets refinements between minor releases. Don't pin to
+the `main` branch in production — pin to a tag.
 
-```
-loro_ex/
-├── lib/
-│   ├── loro_ex.ex            # friendly Elixir API
-│   └── loro_ex/native.ex     # NIF stubs (`use Rustler`)
-├── native/
-│   └── loro_nif/
-│       ├── Cargo.toml
-│       └── src/lib.rs        # the NIF itself
-├── test/
-│   └── loro_ex_test.exs      # phase-1 acceptance tests
-├── docs/
-│   └── design.md             # invariants & reasoning
-├── rust-toolchain.toml       # pin Rust to stable
-├── mix.exs
-└── README.md                 # you are here
-```
+### Released
 
-## Roadmap
+- **0.5.0** — Tier-1 collaboration APIs (UndoManager, Presence, marks)
+- **0.6.0** — nested-container ergonomics, structured map/list values
+- **0.7.0** — `LoroEx.fork/1` for off-GenServer snapshot export
+- **0.8.0** — projection-pipeline NIF, MovableList, tree queries,
+  `revert_to/2`, 17 small `LoroDoc` additions
 
-### 0.1.0 (current)
+### In flight (0.9.0)
 
-- [x] Phase-1 NIF API: lifecycle, sync primitives, text, map, tree
-- [x] Three convergence acceptance tests passing
-- [x] Design doc & invariants
-- [ ] Initial public release
-
-### 0.2.0 (current)
-
-- [x] `subscribe/2` & `unsubscribe/1` NIFs with the no-re-entrancy
-      callback contract
-- [x] Structured error atoms (`:invalid_update`, `:cyclic_move`, …)
-- [ ] `rustler_precompiled` setup with signed artifacts per platform
-      (x86_64-linux-gnu, aarch64-linux-gnu, aarch64-apple-darwin)
+- [ ] Precompiled NIF artifacts via `rustler_precompiled`
+- [ ] Time travel API: `checkout/2`, `attach/1`, `detach/1`,
+      `detached?/1`, `checkout_to_latest/1`, `set_detached_editing/2`
+- [ ] JSON-path queries: `get_by_str_path/2`, `jsonpath/2`
+- [ ] `LoroCounter` container — closes container-coverage gap to 100%
+- [ ] Background-thread subscription dispatcher (mpsc, no per-event spawn)
+- [ ] `subscribe_pre_commit/2`, `subscribe_peer_id_change/2`
 - [ ] Property-based convergence tests with `stream_data`
-- [ ] Formatter + Credo + Clippy CI job
-- [ ] Dedicated background thread + mpsc for subscription sends
-      (replace per-event `std::thread::spawn`)
 
-### 0.3.0
-
-- [ ] Awareness / presence container integration
-- [ ] `UndoManager` per-peer wiring
-- [ ] JSON-path query API (Loro supports it natively)
-
-### 1.0.0
+### 1.0.0 (planned)
 
 - [ ] Stable public API, semver guarantees
 - [ ] Hex.pm publication
+- [ ] Sigstore-signed NIF artifacts
 - [ ] Upstream Loro major bumps validated via property tests
 
 ## Contributing
 
 PRs welcome. For non-trivial changes, please open an issue first so we
 can discuss scope. CI runs `cargo fmt`, `cargo clippy`, `credo`,
-`dialyzer`, and the NIF tests on every PR.
+`dialyzer`, and the full NIF tests on every PR.
 
 When bumping Loro:
 
