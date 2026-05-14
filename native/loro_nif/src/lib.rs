@@ -467,6 +467,26 @@ fn decode_import_blob_meta(bytes: Binary, check_checksum: bool) -> NifResult<Str
     serde_json::to_string(&json).map_err(json_err_to_nif)
 }
 
+/// Rewind the doc to a previous frontier by emitting **new ops** that
+/// invert the changes since that point. NOT a checkout — `revert_to`
+/// produces forward-compatible inverse ops which:
+///
+///   * sync to peers like any other edit
+///   * fire subscription callbacks
+///   * are tracked by `UndoManager` and can themselves be undone
+///
+/// Errors with `:invalid_frontier` if the binary doesn't decode, or
+/// `:not_found` / `:incompatible_version` if the frontier references
+/// ops the doc doesn't have.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn revert_to(doc: ResourceArc<DocResource>, frontier: Binary) -> NifResult<Atom> {
+    let frontiers = Frontiers::decode(frontier.as_slice())
+        .map_err(|e| NifError::Term(Box::new((atoms::invalid_frontier(), format!("{e:?}")))))?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.revert_to(&frontiers).map_err(loro_err_to_nif)?;
+    Ok(atoms::ok())
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn export_snapshot(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
