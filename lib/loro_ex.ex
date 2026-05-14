@@ -427,6 +427,57 @@ defmodule LoroEx do
   defdelegate oplog_version(doc), to: Native
 
   @doc """
+  Return the list of container ids that received at least one op
+  between `from_vv` (exclusive) and the doc's current oplog version
+  (inclusive).
+
+  `from_vv` is the opaque binary returned by `oplog_version/1` at the
+  point you last processed the doc — typically stored alongside a
+  projection or cache so the next pass only re-walks what actually
+  changed. Returns the empty list when `from_vv` equals the current
+  version. Returns `{:error, {:invalid_version_vector, _}}` if the
+  binary is not a well-formed Loro version vector.
+
+  Cost is O(ops_since), not O(doc_size). For a single paragraph edit
+  on a 500-block doc this typically returns 1–3 CIDs in microseconds.
+
+  ## Use case
+
+  The Layer-1 pre-filter for a projection / cache rebuilder. Without
+  it, every refresh walks the whole doc tree to detect what changed;
+  with it, the rebuilder scopes its diff to the containers that
+  actually moved:
+
+      last_vv = ProjectionState.get_vv(doc_id)
+      touched = LoroEx.containers_touched_since(doc, last_vv)
+      # → ["cid:root-body:Text", "cid:abc123:Map"]
+
+      # Map back to your block ids and re-hash only those.
+      ProjectionState.put_vv(doc_id, LoroEx.oplog_version(doc))
+
+  ## Example
+
+      doc = LoroEx.new()
+      v0  = LoroEx.oplog_version(doc)
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+      LoroEx.containers_touched_since(doc, v0)
+      # => ["cid:root-body:Text"]
+
+  ## Caveats
+
+    * If `from_vv` precedes the doc's `shallow_since_vv` (i.e. the
+      doc is shallow and history before that point has been trimmed),
+      results are limited to the visible suffix of history. Same
+      semantics as `export_updates/2`.
+    * The returned strings are stable Loro `ContainerID` serializations
+      and can be passed back to any container-taking function in this
+      module.
+  """
+  @spec containers_touched_since(doc(), version()) ::
+          [container_id()] | error()
+  defdelegate containers_touched_since(doc, from_vv), to: Native
+
+  @doc """
   Return the opaque **state** version vector.
 
   Distinct from `oplog_version/1`: the state VV reflects the current
