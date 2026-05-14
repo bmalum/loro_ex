@@ -26,7 +26,26 @@ defmodule LoroEx.Native do
   full list of reason atoms.
   """
 
-  use Rustler, otp_app: :loro_ex, crate: "loro_nif"
+  use RustlerPrecompiled,
+    otp_app: :loro_ex,
+    crate: "loro_nif",
+    base_url:
+      "#{Mix.Project.config()[:source_url]}/releases/download/v#{Mix.Project.config()[:version]}",
+    version: Mix.Project.config()[:version],
+    targets: ~w(
+      aarch64-apple-darwin
+      x86_64-apple-darwin
+      aarch64-unknown-linux-gnu
+      x86_64-unknown-linux-gnu
+    ),
+    nif_versions: ["2.17"],
+    # During development we always build from source; the prebuilt path
+    # activates once a release has run through `.github/workflows/release.yml`
+    # and the `checksum-Elixir.LoroEx.Native.exs` file is committed.
+    # Consumers can opt back to source explicitly with FORCE_LORO_EX_BUILD=1.
+    force_build:
+      not File.exists?(Path.join(__DIR__, "../../checksum-Elixir.LoroEx.Native.exs")) or
+        System.get_env("FORCE_LORO_EX_BUILD") in ["1", "true"]
 
   @type doc :: reference()
   @type subscription :: reference()

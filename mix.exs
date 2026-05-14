@@ -33,10 +33,13 @@ defmodule LoroEx.MixProject do
   defp deps do
     [
       # Runtime
-      {:rustler, "~> 0.37"},
+      {:rustler_precompiled, "~> 0.8"},
+      # Kept as optional so consumers who set FORCE_LORO_EX_BUILD=true (or
+      # whose target isn't in our prebuilt matrix) can still build from
+      # source. `optional: true` means rustler is only resolved when a
+      # downstream actually needs it for the source-build path.
+      {:rustler, "~> 0.37", optional: true},
       {:jason, "~> 1.4"},
-      # Optional: use rustler_precompiled once we publish signed NIF artifacts.
-      # {:rustler_precompiled, "~> 0.8"},
 
       # Dev / test
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
@@ -71,7 +74,8 @@ defmodule LoroEx.MixProject do
   defp package do
     [
       files: ~w(lib native/loro_nif/src native/loro_nif/Cargo.toml
-               .formatter.exs mix.exs README.md LICENSE CHANGELOG.md),
+               .formatter.exs mix.exs README.md LICENSE CHANGELOG.md
+               checksum-Elixir.LoroEx.Native.exs),
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url}
     ]
