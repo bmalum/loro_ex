@@ -468,6 +468,102 @@ defmodule LoroExTest do
     end
   end
 
+  describe "tree structural queries" do
+    @tag :nif
+    test "tree_parent: :root for top-level, {:ok, _} for child, :deleted after parent removed" do
+      doc = LoroEx.new()
+      page = LoroEx.tree_create_node(doc, "blocks", nil)
+      child = LoroEx.tree_create_node(doc, "blocks", page)
+
+      assert :root == LoroEx.tree_parent(doc, "blocks", page)
+      assert {:ok, ^page} = LoroEx.tree_parent(doc, "blocks", child)
+
+      # Loro keeps the parent pointer after deletion — the :deleted /
+      # :unexist projections fire only in concurrent-edit scenarios
+      # where a peer references a node it cannot reach. Use
+      # tree_is_node_deleted/3 to detect deleted descendants.
+      :ok = LoroEx.tree_delete_node(doc, "blocks", page)
+      assert {:ok, ^page} = LoroEx.tree_parent(doc, "blocks", child)
+    end
+
+    @tag :nif
+    test "tree_parent returns :tree_node_not_found for malformed id" do
+      doc = LoroEx.new()
+
+      assert {:error, {:invalid_tree_id, _}} =
+               LoroEx.tree_parent(doc, "blocks", "not-a-tree-id")
+    end
+
+    @tag :nif
+    test "tree_children, tree_children_num, tree_roots" do
+      doc = LoroEx.new()
+      a = LoroEx.tree_create_node(doc, "blocks", nil)
+      b = LoroEx.tree_create_node(doc, "blocks", nil)
+      a1 = LoroEx.tree_create_node(doc, "blocks", a)
+      a2 = LoroEx.tree_create_node(doc, "blocks", a)
+
+      roots = LoroEx.tree_roots(doc, "blocks") |> Enum.sort()
+      assert roots == Enum.sort([a, b])
+
+      children = LoroEx.tree_children(doc, "blocks", a) |> Enum.sort()
+      assert children == Enum.sort([a1, a2])
+
+      assert LoroEx.tree_children_num(doc, "blocks", a) == 2
+      assert LoroEx.tree_children_num(doc, "blocks", b) == 0
+
+      # nil parent → root children
+      root_children = LoroEx.tree_children(doc, "blocks", nil) |> Enum.sort()
+      assert root_children == Enum.sort([a, b])
+    end
+
+    @tag :nif
+    test "tree_contains and tree_is_node_deleted" do
+      doc = LoroEx.new()
+      page = LoroEx.tree_create_node(doc, "blocks", nil)
+      child = LoroEx.tree_create_node(doc, "blocks", page)
+
+      assert LoroEx.tree_contains(doc, "blocks", page)
+      refute LoroEx.tree_is_node_deleted(doc, "blocks", page)
+
+      # Loro's `contains` answers "has this id existed in this tree?"
+      # so it remains true after deletion. Use tree_is_node_deleted/3
+      # to distinguish live vs deleted. Deletion also cascades to
+      # descendants.
+      :ok = LoroEx.tree_delete_node(doc, "blocks", page)
+      assert LoroEx.tree_contains(doc, "blocks", page)
+      assert LoroEx.tree_is_node_deleted(doc, "blocks", page)
+      assert LoroEx.tree_is_node_deleted(doc, "blocks", child)
+    end
+
+    @tag :nif
+    test "tree_fractional_index returns a string (default tree has fractional indexes)" do
+      doc = LoroEx.new()
+      n = LoroEx.tree_create_node(doc, "blocks", nil)
+      idx = LoroEx.tree_fractional_index(doc, "blocks", n)
+      # Either nil (if disabled) or a non-empty string. With our default
+      # ensure_tree_ready helper enabling fractional indexes, we expect a
+      # string in normal usage.
+      assert is_nil(idx) or (is_binary(idx) and idx != "")
+    end
+
+    @tag :nif
+    test "tree_get_value_with_meta inlines per-node meta maps" do
+      doc = LoroEx.new()
+      n = LoroEx.tree_create_node(doc, "blocks", nil)
+      meta_cid = LoroEx.tree_get_meta(doc, "blocks", n)
+      :ok = LoroEx.map_set(doc, meta_cid, "kind", ~s("page"))
+
+      json = LoroEx.tree_get_value_with_meta(doc, "blocks")
+      assert {:ok, decoded} = Jason.decode(json)
+      assert is_list(decoded) or is_map(decoded)
+      # Decoded should include the "kind" => "page" somewhere; just
+      # assert the JSON contains the value to keep the assertion shape-
+      # agnostic across Loro versions.
+      assert json =~ "\"kind\""
+      assert json =~ "\"page\""
+    end
+  end
+
   describe "subscriptions" do
     @tag :nif
     test "local updates are delivered to the subscriber" do

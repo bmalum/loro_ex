@@ -174,6 +174,14 @@ defmodule LoroEx.Native do
   def tree_delete_node(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
   def tree_get_nodes(_doc, _tree_id), do: :erlang.nif_error(:nif_not_loaded)
   def tree_get_meta(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_parent(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_children(_doc, _tree_id, _parent_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_children_num(_doc, _tree_id, _parent_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_roots(_doc, _tree_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_contains(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_is_node_deleted(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_fractional_index(_doc, _tree_id, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def tree_get_value_with_meta(_doc, _tree_id), do: :erlang.nif_error(:nif_not_loaded)
 
   # Subscriptions -------------------------------------------------------------
 

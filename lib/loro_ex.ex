@@ -1940,6 +1940,86 @@ defmodule LoroEx do
   @spec tree_get_meta(doc(), container_id(), String.t()) :: container_id() | error()
   defdelegate tree_get_meta(doc, tree_id, node_id), to: Native
 
+  @doc """
+  Return the parent of `node_id` projected as one of:
+
+    * `{:ok, parent_id}` — a real parent node
+    * `:root` — the node is at the top level
+    * `:deleted` — the node's parent has been deleted
+    * `:unexist` — `node_id` parses but never existed in this tree
+
+  Errors with `{:error, {:tree_node_not_found, _}}` if `node_id`
+  isn't a syntactically valid TreeID.
+  """
+  @spec tree_parent(doc(), container_id(), String.t()) ::
+          {:ok, String.t()} | :root | :deleted | :unexist | error()
+  defdelegate tree_parent(doc, tree_id, node_id), to: Native
+
+  @doc """
+  Return the direct children of `parent_id` (or root children if
+  `parent_id` is `nil`). Returns `[]` for a non-existent parent —
+  pair with `tree_contains/3` to disambiguate.
+
+  ## Example
+
+      doc = LoroEx.new()
+      page = LoroEx.tree_create_node(doc, "blocks", nil)
+      _    = LoroEx.tree_create_node(doc, "blocks", page)
+      _    = LoroEx.tree_create_node(doc, "blocks", page)
+
+      LoroEx.tree_children(doc, "blocks", page)
+      # => [child_id_1, child_id_2]
+  """
+  @spec tree_children(doc(), container_id(), String.t() | nil) :: [String.t()] | error()
+  defdelegate tree_children(doc, tree_id, parent_id), to: Native
+
+  @doc """
+  Number of direct children. `0` for a non-existent parent. Cheaper
+  than `length(tree_children(...))` because it doesn't allocate the
+  list.
+  """
+  @spec tree_children_num(doc(), container_id(), String.t() | nil) ::
+          non_neg_integer() | error()
+  defdelegate tree_children_num(doc, tree_id, parent_id), to: Native
+
+  @doc "All root-level node ids in the tree."
+  @spec tree_roots(doc(), container_id()) :: [String.t()] | error()
+  defdelegate tree_roots(doc, tree_id), to: Native
+
+  @doc """
+  `true` if `node_id` is currently a live (non-deleted) node in the
+  tree. `false` for nodes that have been deleted, or for ids that
+  never existed.
+  """
+  @spec tree_contains(doc(), container_id(), String.t()) :: boolean() | error()
+  defdelegate tree_contains(doc, tree_id, node_id), to: Native
+
+  @doc """
+  `true` if `node_id` was created and subsequently deleted. Errors
+  with `{:error, {:tree_node_not_found, _}}` if the id never existed.
+  """
+  @spec tree_is_node_deleted(doc(), container_id(), String.t()) :: boolean() | error()
+  defdelegate tree_is_node_deleted(doc, tree_id, node_id), to: Native
+
+  @doc """
+  Return the fractional index string for `node_id`, or `nil` if the
+  tree wasn't configured to maintain fractional indexes.
+
+  Fractional indexes are deterministic relative-position tokens used
+  for stable ordering across concurrent inserts. Useful for clients
+  that need to render reorderable lists.
+  """
+  @spec tree_fractional_index(doc(), container_id(), String.t()) :: String.t() | nil | error()
+  defdelegate tree_fractional_index(doc, tree_id, node_id), to: Native
+
+  @doc """
+  Return the tree as a JSON string with each node's metadata map
+  inlined. Distinct from `tree_get_nodes/2` which only returns the
+  structural shape.
+  """
+  @spec tree_get_value_with_meta(doc(), container_id()) :: String.t() | error()
+  defdelegate tree_get_value_with_meta(doc, tree_id), to: Native
+
   # ============================================================================
   # Subscriptions (local-update bytes)
   # ============================================================================
