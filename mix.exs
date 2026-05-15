@@ -94,7 +94,8 @@ defmodule LoroEx.MixProject do
         "docs/guides/sync_and_persistence.md",
         "docs/guides/presence_and_cursors.md",
         "docs/guides/tree_and_blocks.md",
-        "docs/guides/undo.md"
+        "docs/guides/undo.md",
+        "docs/guides/time_travel.md"
       ],
       groups_for_extras: [
         Guides: ~r/docs\/guides\//,

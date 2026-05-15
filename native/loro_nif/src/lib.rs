@@ -487,6 +487,84 @@ fn revert_to(doc: ResourceArc<DocResource>, frontier: Binary) -> NifResult<Atom>
     Ok(atoms::ok())
 }
 
+// ---------------------------------------------------------------------------
+// Time travel
+// ---------------------------------------------------------------------------
+//
+// Distinct from `revert_to`: checkout *changes the visible state* of the
+// doc to a past point without producing new ops. While detached, the doc
+// rejects new commits unless `set_detached_editing(true)` was called.
+// `attach` re-enables live ops; `checkout_to_latest` does both at once.
+//
+// Concurrency note: under our `Mutex<LoroDoc>`, `checkout` is internally
+// synchronized, but it mutates *visible state*. Any other process holding
+// the doc handle and reading after the checkout will see the rewound state.
+// The "one GenServer per doc" pattern serializes around this cleanly.
+
+/// Rewind the doc's visible state to `frontier`. Reads after this call
+/// see the doc as it existed at that point. Use `attach/1` (or
+/// `checkout_to_latest/1`) to return to the live state.
+///
+/// Errors:
+///   * `:invalid_frontier` — binary doesn't decode
+///   * `:not_found` / `:incompatible_version` — frontier references
+///     ops the doc doesn't have
+#[rustler::nif(schedule = "DirtyCpu")]
+fn checkout(doc: ResourceArc<DocResource>, frontier: Binary) -> NifResult<Atom> {
+    let frontiers = Frontiers::decode(frontier.as_slice())
+        .map_err(|e| NifError::Term(Box::new((atoms::invalid_frontier(), format!("{e:?}")))))?;
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.checkout(&frontiers).map_err(loro_err_to_nif)?;
+    Ok(atoms::ok())
+}
+
+/// Re-attach the doc to its latest known state and resume accepting
+/// new ops. Idempotent if the doc is already attached.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn checkout_to_latest(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.checkout_to_latest();
+    Ok(atoms::ok())
+}
+
+/// Re-attach to live state. Same effect as `checkout_to_latest/1`.
+/// Kept as a separate name because Loro exposes both verbs and
+/// callers may prefer the `attach`/`detach` pairing for readability.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn attach(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.attach();
+    Ok(atoms::ok())
+}
+
+/// Detach the doc from its latest state without rewinding. The doc
+/// rejects new commits while detached unless `set_detached_editing(true)`
+/// is enabled.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn detach(doc: ResourceArc<DocResource>) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.detach();
+    Ok(atoms::ok())
+}
+
+/// `true` if the doc is currently detached (post `checkout/2` or
+/// `detach/1`, before `attach/1` or `checkout_to_latest/1`).
+#[rustler::nif(schedule = "DirtyCpu")]
+fn is_detached(doc: ResourceArc<DocResource>) -> NifResult<bool> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(guard.is_detached())
+}
+
+/// Allow / forbid new commits while the doc is detached. Default is
+/// `false`. Enable when you intentionally want to fork history off a
+/// past frontier.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn set_detached_editing(doc: ResourceArc<DocResource>, enable: bool) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    guard.set_detached_editing(enable);
+    Ok(atoms::ok())
+}
+
 #[rustler::nif(schedule = "DirtyCpu")]
 fn export_snapshot(doc: ResourceArc<DocResource>) -> NifResult<OwnedBinary> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;

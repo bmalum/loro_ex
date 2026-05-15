@@ -344,6 +344,101 @@ defmodule LoroExTest do
     end
   end
 
+  describe "time travel" do
+    @tag :nif
+    test "checkout rewinds visible state, attach restores it" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+      checkpoint = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 5, " world")
+      assert LoroEx.get_text(doc, "body") == "hello world"
+      refute LoroEx.detached?(doc)
+
+      :ok = LoroEx.checkout(doc, checkpoint)
+      assert LoroEx.get_text(doc, "body") == "hello"
+      assert LoroEx.detached?(doc)
+
+      :ok = LoroEx.attach(doc)
+      assert LoroEx.get_text(doc, "body") == "hello world"
+      refute LoroEx.detached?(doc)
+    end
+
+    @tag :nif
+    test "checkout_to_latest is equivalent to attach" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "abc")
+      cp = LoroEx.oplog_frontiers(doc)
+      :ok = LoroEx.insert_text(doc, "body", 3, "def")
+
+      :ok = LoroEx.checkout(doc, cp)
+      assert LoroEx.detached?(doc)
+
+      :ok = LoroEx.checkout_to_latest(doc)
+      refute LoroEx.detached?(doc)
+      assert LoroEx.get_text(doc, "body") == "abcdef"
+    end
+
+    @tag :nif
+    test "detach toggles detached? without rewinding state" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "live")
+
+      :ok = LoroEx.detach(doc)
+      assert LoroEx.detached?(doc)
+      # State unchanged (we didn't rewind, just detached).
+      assert LoroEx.get_text(doc, "body") == "live"
+
+      :ok = LoroEx.attach(doc)
+      refute LoroEx.detached?(doc)
+    end
+
+    @tag :nif
+    test "detached writes are rejected by default and accepted when set_detached_editing(true)" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "shared")
+      branch = LoroEx.oplog_frontiers(doc)
+      # An edit *after* the captured frontier so checkout actually rewinds.
+      :ok = LoroEx.insert_text(doc, "body", 6, " - main")
+
+      :ok = LoroEx.checkout(doc, branch)
+      assert LoroEx.detached?(doc)
+      assert LoroEx.get_text(doc, "body") == "shared"
+
+      # By default, detached writes are accepted by the call but don't
+      # advance state — the doc stays at the rewound frontier.
+      _ = LoroEx.insert_text(doc, "body", 6, " (no-op)")
+      assert LoroEx.get_text(doc, "body") == "shared"
+
+      :ok = LoroEx.set_detached_editing(doc, true)
+      :ok = LoroEx.insert_text(doc, "body", 6, " - alt")
+      assert LoroEx.get_text(doc, "body") == "shared - alt"
+    end
+
+    @tag :nif
+    test "checkout errors on a malformed frontier" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "x")
+
+      assert {:error, {:invalid_frontier, _}} = LoroEx.checkout(doc, <<>>)
+    end
+
+    @tag :nif
+    test "subscriptions fire when checkout changes state" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "a")
+      cp = LoroEx.oplog_frontiers(doc)
+      :ok = LoroEx.insert_text(doc, "body", 1, "b")
+
+      _sub = LoroEx.subscribe_root(doc, self())
+      :ok = LoroEx.checkout(doc, cp)
+
+      # The structured-diff subscription fires on the rewind so renderers
+      # can reflect the new visible state.
+      assert_receive {:loro_diff, _ref, _bytes}, 200
+    end
+  end
+
   describe "movable list" do
     @tag :nif
     test "push, length, get_json round-trip" do

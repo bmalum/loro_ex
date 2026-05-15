@@ -411,6 +411,112 @@ defmodule LoroEx do
   @spec revert_to(doc(), frontier()) :: :ok | error()
   defdelegate revert_to(doc, frontier), to: Native
 
+  # ============================================================================
+  # Time travel
+  # ============================================================================
+
+  @doc """
+  Rewind the doc's visible state to `frontier` without producing any
+  ops. Reads after this call see the doc as it existed at that point.
+  Use `attach/1` (or `checkout_to_latest/1`) to return to the live
+  state.
+
+  Distinct from `revert_to/2`:
+
+    * `revert_to/2` produces **new** inverse ops that sync to peers.
+    * `checkout/2` only changes the local view — peers see nothing.
+
+  ## Concurrency
+
+  `checkout/2` mutates visible state under the doc's internal mutex.
+  Other processes that read through the same handle after this call
+  see the rewound state. The "one GenServer per doc" pattern
+  serializes around this cleanly. Multi-handle setups need an
+  explicit lock around `checkout` + reads.
+
+  ## Detached writes
+
+  By default a detached doc rejects new commits. Call
+  `set_detached_editing/2` with `true` to allow forking history off
+  the rewound point.
+
+  Errors `{:error, {:invalid_frontier, _}}` if `frontier` does not
+  decode, or `{:error, {:not_found, _}}` if it references ops the doc
+  doesn't have.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+      checkpoint = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.insert_text(doc, "body", 5, " world")
+      LoroEx.get_text(doc, "body")
+      # => "hello world"
+
+      :ok = LoroEx.checkout(doc, checkpoint)
+      LoroEx.get_text(doc, "body")
+      # => "hello"
+
+      :ok = LoroEx.attach(doc)
+      LoroEx.get_text(doc, "body")
+      # => "hello world"
+  """
+  @spec checkout(doc(), frontier()) :: :ok | error()
+  defdelegate checkout(doc, frontier), to: Native
+
+  @doc """
+  Re-attach the doc to its latest known state and resume accepting
+  new ops. Idempotent if the doc is already attached.
+  """
+  @spec checkout_to_latest(doc()) :: :ok | error()
+  defdelegate checkout_to_latest(doc), to: Native
+
+  @doc """
+  Re-attach to live state. Same effect as `checkout_to_latest/1` —
+  exposed under the `attach`/`detach` verb pairing for readability.
+  """
+  @spec attach(doc()) :: :ok | error()
+  defdelegate attach(doc), to: Native
+
+  @doc """
+  Detach the doc from its latest state without rewinding. The doc
+  rejects new commits while detached unless `set_detached_editing/2`
+  is enabled. Use `attach/1` (or `checkout_to_latest/1`) to re-attach.
+  """
+  @spec detach(doc()) :: :ok | error()
+  defdelegate detach(doc), to: Native
+
+  @doc """
+  `true` if the doc is currently detached — i.e. either after
+  `checkout/2` or `detach/1`, before `attach/1` /
+  `checkout_to_latest/1`.
+  """
+  @spec detached?(doc()) :: boolean() | error()
+  defdelegate detached?(doc), to: Native, as: :is_detached
+
+  @doc """
+  Allow or forbid new commits while the doc is detached. Default
+  `false`. Enable when you intentionally want to fork history off a
+  past frontier.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "shared")
+      branch_point = LoroEx.oplog_frontiers(doc)
+
+      :ok = LoroEx.checkout(doc, branch_point)
+      :ok = LoroEx.set_detached_editing(doc, true)
+
+      # New ops apply on the detached branch:
+      :ok = LoroEx.insert_text(doc, "body", 6, " (alt)")
+      LoroEx.get_text(doc, "body")
+      # => "shared (alt)"
+  """
+  @spec set_detached_editing(doc(), boolean()) :: :ok | error()
+  defdelegate set_detached_editing(doc, enable), to: Native
+
   @doc """
   Export the entire document state as a self-contained snapshot.
 
