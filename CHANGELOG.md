@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-05-15
+
+Production polish release. Strictly additive — zero breaking changes.
+NIF surface grows from **115 → ~130 functions**. Test suite from
+**133 → 158** `:nif`-tagged tests.
+
+### Added — Precompiled NIF artifacts (`rustler_precompiled`)
+
+Foundation for zero-Rust-toolchain installs. Four targets ship in the
+release asset matrix:
+
+| Target triple | Platform |
+|---|---|
+| `aarch64-apple-darwin` | Apple Silicon Mac |
+| `x86_64-apple-darwin` | Intel Mac |
+| `aarch64-unknown-linux-gnu` | ARM Linux (Graviton, Pi) |
+| `x86_64-unknown-linux-gnu` | AMD64 Linux |
+
+Set `FORCE_LORO_EX_BUILD=1` to fall back to a source build.
+
+### Added — Time travel API (6 NIFs)
+
+- `LoroEx.checkout/2` — detach and move state to a given frontier.
+- `LoroEx.attach/1` — re-attach a detached doc to latest.
+- `LoroEx.detach/1` — detach without checking out.
+- `LoroEx.detached?/1` — predicate for detached state.
+- `LoroEx.checkout_to_latest/1` — shorthand for checkout + attach.
+- `LoroEx.set_detached_editing/2` — enable/disable editing while
+  detached.
+
+### Added — JSON-path queries (2 NIFs)
+
+- `LoroEx.get_by_str_path/2` — resolve a `/`-separated path to a
+  JSON value.
+- `LoroEx.jsonpath/2` — evaluate a JSONPath expression against the
+  doc state.
+
+### Added — `LoroCounter` container (3 NIFs + `:counter` kind)
+
+Closes the container-coverage gap to 100% of Loro 1.12's types.
+
+- `LoroEx.counter_increment/3` — increment (or decrement) by a float.
+- `LoroEx.counter_get/2` — read current value.
+- `LoroEx.counter_decrement/3` — convenience decrement wrapper.
+- `:counter` added to the container kind enum.
+
+### Added — Subscription improvements (2 NIFs + internal dispatcher)
+
+- `LoroEx.subscribe_pre_commit/2` — fire callback before a
+  transaction commits (validation / side-effects).
+- `LoroEx.subscribe_peer_id_change/2` — notify when the doc's peer
+  id changes (fork, set_peer_id).
+- **Internal**: subscription dispatcher rewritten from per-event
+  spawn to a dedicated background thread with mpsc channel. Removes
+  the throughput ceiling noted in 0.2.0.
+
+### Added — Property-based convergence tests (4 properties)
+
+Powered by `stream_data`. Tagged `:property` (excluded from default
+`mix test`; included via `--include property`).
+
+- Concurrent text edits converge after bidirectional sync.
+- Concurrent map mutations converge.
+- Concurrent list operations converge.
+- Concurrent tree moves produce no cycles and converge.
+
+### Internal
+
+- 25 new tests; suite grows from 133 → 158 `:nif`-tagged tests.
+- `mix test --include nif --include property` exercises the full
+  surface.
+
 ## [0.8.0] — 2026-05-14
 
 The biggest single release since 0.5.0. Closes the largest functional gaps
