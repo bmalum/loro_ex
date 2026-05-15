@@ -662,6 +662,66 @@ defmodule LoroExTest do
     end
   end
 
+  describe "counter" do
+    @tag :nif
+    test "increment / decrement round-trip with integers and floats" do
+      doc = LoroEx.new()
+      cid = LoroEx.map_insert_container(doc, "stats", "views", :counter)
+
+      assert LoroEx.counter_get(doc, cid) == 0.0
+
+      :ok = LoroEx.counter_increment(doc, cid, 5)
+      assert LoroEx.counter_get(doc, cid) == 5.0
+
+      :ok = LoroEx.counter_increment(doc, cid, 2.5)
+      assert LoroEx.counter_get(doc, cid) == 7.5
+
+      :ok = LoroEx.counter_decrement(doc, cid, 1)
+      assert LoroEx.counter_get(doc, cid) == 6.5
+
+      # Negative deltas via increment
+      :ok = LoroEx.counter_increment(doc, cid, -10)
+      assert LoroEx.counter_get(doc, cid) == -3.5
+    end
+
+    @tag :nif
+    test "concurrent increments converge to their sum" do
+      alice = LoroEx.new(1)
+      cid = LoroEx.map_insert_container(alice, "stats", "views", :counter)
+
+      bob = LoroEx.new(2)
+      :ok = LoroEx.apply_update(bob, LoroEx.export_snapshot(alice))
+
+      :ok = LoroEx.counter_increment(alice, cid, 3)
+      :ok = LoroEx.counter_increment(bob, cid, 4)
+
+      :ok = LoroEx.apply_update(alice, LoroEx.export_snapshot(bob))
+      :ok = LoroEx.apply_update(bob, LoroEx.export_snapshot(alice))
+
+      assert LoroEx.counter_get(alice, cid) == 7.0
+      assert LoroEx.counter_get(bob, cid) == 7.0
+    end
+
+    @tag :nif
+    test "counter embedded in a list works the same way" do
+      doc = LoroEx.new()
+      cid = LoroEx.list_insert_container(doc, "metrics", 0, :counter)
+
+      :ok = LoroEx.counter_increment(doc, cid, 42)
+      assert LoroEx.counter_get(doc, cid) == 42.0
+    end
+
+    @tag :nif
+    test "counter shows up in the deep value of its parent" do
+      doc = LoroEx.new()
+      cid = LoroEx.map_insert_container(doc, "stats", "n", :counter)
+      :ok = LoroEx.counter_increment(doc, cid, 9)
+
+      assert {:ok, %{"n" => 9.0}} =
+               doc |> LoroEx.get_map_json("stats") |> Jason.decode()
+    end
+  end
+
   describe "movable tree" do
     @tag :nif
     test "concurrent moves converge without cycle" do
@@ -1478,9 +1538,6 @@ defmodule LoroExTest do
     @tag :nif
     test "invalid container kind → :invalid_container_kind" do
       doc = LoroEx.new()
-
-      assert {:error, {:invalid_container_kind, _}} =
-               LoroEx.map_insert_container(doc, "settings", "k", :counter)
 
       assert {:error, {:invalid_container_kind, _}} =
                LoroEx.map_insert_container(doc, "settings", "k", :not_a_real_kind)
