@@ -229,6 +229,8 @@ defmodule LoroEx.Native do
   def unsubscribe(_sub), do: :erlang.nif_error(:nif_not_loaded)
   def subscribe_container(_doc, _cid, _pid), do: :erlang.nif_error(:nif_not_loaded)
   def subscribe_root(_doc, _pid), do: :erlang.nif_error(:nif_not_loaded)
+  def subscribe_pre_commit(_doc, _pid), do: :erlang.nif_error(:nif_not_loaded)
+  def subscribe_peer_id_change(_doc, _pid), do: :erlang.nif_error(:nif_not_loaded)
 
   # UndoManager ---------------------------------------------------------------
 

@@ -927,6 +927,49 @@ defmodule LoroExTest do
     end
   end
 
+  describe "subscribe_pre_commit / subscribe_peer_id_change" do
+    @tag :nif
+    test "pre_commit fires before commit completes and carries change_meta" do
+      doc = LoroEx.new(7)
+      sub = LoroEx.subscribe_pre_commit(doc, self())
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+
+      assert_receive {:loro_pre_commit, ^sub, json}, 500
+      assert {:ok, payload} = Jason.decode(json)
+      assert payload["origin"] == ""
+      assert [7, _counter] = payload["id"]
+      assert is_integer(payload["lamport"])
+      assert is_integer(payload["len"])
+      assert is_list(payload["deps"])
+    end
+
+    @tag :nif
+    test "peer_id_change fires after set_peer_id" do
+      doc = LoroEx.new(1)
+      sub = LoroEx.subscribe_peer_id_change(doc, self())
+
+      :ok = LoroEx.set_peer_id(doc, 42)
+      assert_receive {:loro_peer_id_change, ^sub, 42}, 500
+    end
+
+    @tag :nif
+    test "unsubscribe stops both kinds of subscription" do
+      doc = LoroEx.new(1)
+      pre_sub = LoroEx.subscribe_pre_commit(doc, self())
+      peer_sub = LoroEx.subscribe_peer_id_change(doc, self())
+
+      :ok = LoroEx.unsubscribe(pre_sub)
+      :ok = LoroEx.unsubscribe(peer_sub)
+
+      :ok = LoroEx.insert_text(doc, "body", 0, "x")
+      :ok = LoroEx.set_peer_id(doc, 99)
+
+      refute_receive {:loro_pre_commit, _, _}, 100
+      refute_receive {:loro_peer_id_change, _, _}, 100
+    end
+  end
+
   describe "map mutation" do
     @tag :nif
     test "set / get / delete on a root map" do
