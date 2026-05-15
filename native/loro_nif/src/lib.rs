@@ -22,8 +22,7 @@
 //!    would deadlock. Callbacks only encode and `send` to a pid.
 
 use rustler::{
-    Atom, Binary, Encoder, Error as NifError, LocalPid, NifResult, OwnedBinary, OwnedEnv,
-    ResourceArc,
+    Atom, Binary, Encoder, Error as NifError, LocalPid, NifResult, OwnedBinary, ResourceArc,
 };
 use std::sync::Mutex;
 
@@ -135,6 +134,113 @@ pub struct EphemeralResource {
 
 #[rustler::resource_impl]
 impl rustler::Resource for EphemeralResource {}
+
+// ---------------------------------------------------------------------------
+// Subscription dispatcher
+// ---------------------------------------------------------------------------
+//
+// Subscription callbacks (local update, structured diff, ephemeral)
+// historically spawned a fresh OS thread per event to send the message
+// and exit. For a doc taking 1000 ops/sec across active subscribers, that
+// was 1000 thread spawns/sec — the kind of thing that doesn't show up in
+// microbenchmarks but burns CPU on a busy server.
+//
+// Replace it with a single mpsc-fed dispatcher thread per loaded NIF.
+// Started lazily on the first event, never torn down (BEAM-process-
+// lifetime). Ordering across subscriptions isn't strict — the channel
+// is FIFO from any single sender — but per-subscription order is
+// preserved because each callback path serializes on Loro's commit
+// mutex anyway.
+
+mod dispatcher {
+    use rustler::{Encoder, LocalPid, OwnedEnv, ResourceArc};
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::OnceLock;
+
+    use crate::{atoms, SubscriptionResource};
+
+    pub enum Message {
+        LocalUpdate {
+            target: LocalPid,
+            sub_ref: ResourceArc<SubscriptionResource>,
+            bytes: Vec<u8>,
+        },
+        Diff {
+            target: LocalPid,
+            sub_ref: ResourceArc<SubscriptionResource>,
+            json_bytes: Vec<u8>,
+        },
+        Ephemeral {
+            target: LocalPid,
+            sub_ref: ResourceArc<SubscriptionResource>,
+            bytes: Vec<u8>,
+        },
+    }
+
+    static SENDER: OnceLock<Sender<Message>> = OnceLock::new();
+
+    fn spawn_dispatcher() -> Sender<Message> {
+        let (tx, rx) = channel::<Message>();
+        std::thread::Builder::new()
+            .name("loro_nif_dispatcher".into())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    handle(msg);
+                }
+            })
+            .expect("failed to spawn loro_nif dispatcher thread");
+        tx
+    }
+
+    pub fn send(msg: Message) {
+        let tx = SENDER.get_or_init(spawn_dispatcher);
+        // If send fails the dispatcher thread has died; we drop the message
+        // silently rather than panicking inside a Loro callback.
+        let _ = tx.send(msg);
+    }
+
+    fn handle(msg: Message) {
+        let mut env = OwnedEnv::new();
+        match msg {
+            Message::LocalUpdate {
+                target,
+                sub_ref,
+                bytes,
+            } => {
+                let _ = env.send_and_clear(&target, |env| {
+                    let mut bin = rustler::NewBinary::new(env, bytes.len());
+                    bin.as_mut_slice().copy_from_slice(&bytes);
+                    let bin_term: rustler::Term = bin.into();
+                    (atoms::loro_event(), sub_ref, bin_term).encode(env)
+                });
+            }
+            Message::Diff {
+                target,
+                sub_ref,
+                json_bytes,
+            } => {
+                let _ = env.send_and_clear(&target, |env| {
+                    let mut bin = rustler::NewBinary::new(env, json_bytes.len());
+                    bin.as_mut_slice().copy_from_slice(&json_bytes);
+                    let bin_term: rustler::Term = bin.into();
+                    (atoms::loro_diff(), sub_ref, bin_term).encode(env)
+                });
+            }
+            Message::Ephemeral {
+                target,
+                sub_ref,
+                bytes,
+            } => {
+                let _ = env.send_and_clear(&target, |env| {
+                    let mut bin = rustler::NewBinary::new(env, bytes.len());
+                    bin.as_mut_slice().copy_from_slice(&bytes);
+                    let bin_term: rustler::Term = bin.into();
+                    (atoms::loro_ephemeral(), sub_ref, bin_term).encode(env)
+                });
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -2302,17 +2408,10 @@ fn subscribe(
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let sub_for_callback = sub_resource.clone();
     let subscription = guard.subscribe_local_update(Box::new(move |update_bytes: &Vec<u8>| {
-        let target = pid;
-        let bytes = update_bytes.clone();
-        let sub_ref = sub_for_callback.clone();
-        std::thread::spawn(move || {
-            let mut msg_env = OwnedEnv::new();
-            let _ = msg_env.send_and_clear(&target, |env| {
-                let mut new_bin = rustler::NewBinary::new(env, bytes.len());
-                new_bin.as_mut_slice().copy_from_slice(&bytes);
-                let bin_term: rustler::Term = new_bin.into();
-                (atoms::loro_event(), sub_ref, bin_term).encode(env)
-            });
+        dispatcher::send(dispatcher::Message::LocalUpdate {
+            target: pid,
+            sub_ref: sub_for_callback.clone(),
+            bytes: update_bytes.clone(),
         });
         true
     }));
@@ -2476,17 +2575,13 @@ fn deliver_diff_event(
     sub_ref: ResourceArc<SubscriptionResource>,
     events_value: serde_json::Value,
 ) {
-    std::thread::spawn(move || {
-        let Ok(json_str) = serde_json::to_string(&events_value) else {
-            return;
-        };
-        let mut msg_env = OwnedEnv::new();
-        let _ = msg_env.send_and_clear(&target, |env| {
-            let mut bin = rustler::NewBinary::new(env, json_str.len());
-            bin.as_mut_slice().copy_from_slice(json_str.as_bytes());
-            let bin_term: rustler::Term = bin.into();
-            (atoms::loro_diff(), sub_ref, bin_term).encode(env)
-        });
+    let Ok(json_str) = serde_json::to_string(&events_value) else {
+        return;
+    };
+    dispatcher::send(dispatcher::Message::Diff {
+        target,
+        sub_ref,
+        json_bytes: json_str.into_bytes(),
     });
 }
 
@@ -2710,17 +2805,10 @@ fn ephemeral_subscribe(
     let subscription = store
         .inner
         .subscribe_local_updates(Box::new(move |bytes: &Vec<u8>| {
-            let target = pid;
-            let data = bytes.clone();
-            let sub_ref = sub_for_callback.clone();
-            std::thread::spawn(move || {
-                let mut msg_env = OwnedEnv::new();
-                let _ = msg_env.send_and_clear(&target, |env| {
-                    let mut new_bin = rustler::NewBinary::new(env, data.len());
-                    new_bin.as_mut_slice().copy_from_slice(&data);
-                    let bin_term: rustler::Term = new_bin.into();
-                    (atoms::loro_ephemeral(), sub_ref, bin_term).encode(env)
-                });
+            dispatcher::send(dispatcher::Message::Ephemeral {
+                target: pid,
+                sub_ref: sub_for_callback.clone(),
+                bytes: bytes.clone(),
             });
             true
         }));
