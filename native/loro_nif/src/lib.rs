@@ -83,6 +83,9 @@ mod atoms {
         deleted,
         unexist,
 
+        // JSON-path
+        invalid_path,
+
         // Event tags
         loro_event,
         loro_diff,
@@ -790,6 +793,44 @@ fn get_deep_value_with_id(doc: ResourceArc<DocResource>) -> NifResult<String> {
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let value = guard.get_deep_value_with_id();
     serde_json::to_string(&value).map_err(json_err_to_nif)
+}
+
+// ---------------------------------------------------------------------------
+// JSON-path queries
+// ---------------------------------------------------------------------------
+
+/// Look up a single value or container at a JSON-path expression.
+/// Returns the deep value as a JSON string, or `null` if the path
+/// resolves to nothing.
+///
+/// Path syntax follows Loro's JSON-path implementation, which is a
+/// subset of [RFC 9535](https://datatracker.ietf.org/doc/rfc9535/).
+/// See `get_by_str_path/2` in the Elixir-side docs for examples.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn get_by_str_path(doc: ResourceArc<DocResource>, path: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    match guard.get_by_str_path(&path) {
+        Some(voc) => serde_json::to_string(&voc.get_deep_value()).map_err(json_err_to_nif),
+        None => Ok("null".to_string()),
+    }
+}
+
+/// Run a JSON-path query and return all matches as a JSON array
+/// string. An empty array means no matches; `:invalid_path` means
+/// the expression itself didn't parse.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn jsonpath(doc: ResourceArc<DocResource>, path: String) -> NifResult<String> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let results = guard
+        .jsonpath(&path)
+        .map_err(|e| NifError::Term(Box::new((atoms::invalid_path(), format!("{e:?}")))))?;
+
+    let json_arr: Vec<serde_json::Value> = results
+        .iter()
+        .map(|voc| serde_json::to_value(voc.get_deep_value()).unwrap_or(serde_json::Value::Null))
+        .collect();
+
+    serde_json::to_string(&serde_json::Value::Array(json_arr)).map_err(json_err_to_nif)
 }
 
 // ---------------------------------------------------------------------------

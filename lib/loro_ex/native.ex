@@ -104,6 +104,8 @@ defmodule LoroEx.Native do
   def analyze(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def get_path_to_container(_doc, _container_id), do: :erlang.nif_error(:nif_not_loaded)
   def get_deep_value_with_id(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def get_by_str_path(_doc, _path), do: :erlang.nif_error(:nif_not_loaded)
+  def jsonpath(_doc, _path), do: :erlang.nif_error(:nif_not_loaded)
 
   # Memory hygiene ------------------------------------------------------------
 

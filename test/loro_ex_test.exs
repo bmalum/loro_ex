@@ -439,6 +439,68 @@ defmodule LoroExTest do
     end
   end
 
+  describe "JSON-path queries" do
+    @tag :nif
+    test "get_by_str_path resolves a root container value" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+
+      assert ~s("hello") == LoroEx.get_by_str_path(doc, "body")
+    end
+
+    @tag :nif
+    test "get_by_str_path resolves a nested map key" do
+      doc = LoroEx.new()
+      :ok = LoroEx.map_set(doc, "settings", "theme", ~s("dark"))
+
+      assert ~s("dark") == LoroEx.get_by_str_path(doc, "settings/theme")
+    end
+
+    @tag :nif
+    test "get_by_str_path resolves a list element by index" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("login"))
+      :ok = LoroEx.list_push(doc, "events", ~s("edit"))
+
+      assert ~s("login") == LoroEx.get_by_str_path(doc, "events/0")
+      assert ~s("edit") == LoroEx.get_by_str_path(doc, "events/1")
+    end
+
+    @tag :nif
+    test "get_by_str_path returns \"null\" for a missing path" do
+      doc = LoroEx.new()
+      assert "null" == LoroEx.get_by_str_path(doc, "does_not_exist")
+    end
+
+    @tag :nif
+    test "jsonpath returns all matches as a JSON array" do
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("a"))
+      :ok = LoroEx.list_push(doc, "events", ~s("b"))
+      :ok = LoroEx.list_push(doc, "events", ~s("c"))
+
+      assert {:ok, ["a", "b", "c"]} =
+               LoroEx.jsonpath(doc, "$.events[*]") |> Jason.decode()
+    end
+
+    @tag :nif
+    test "jsonpath returns [] for a path that matches nothing" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+
+      assert {:ok, []} = LoroEx.jsonpath(doc, "$.no_match[*]") |> Jason.decode()
+    end
+
+    @tag :nif
+    test "jsonpath returns :invalid_path for a malformed expression" do
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hi")
+
+      assert {:error, {:invalid_path, _detail}} =
+               LoroEx.jsonpath(doc, "$$$$invalid")
+    end
+  end
+
   describe "movable list" do
     @tag :nif
     test "push, length, get_json round-trip" do
