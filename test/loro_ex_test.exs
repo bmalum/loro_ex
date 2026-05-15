@@ -900,6 +900,31 @@ defmodule LoroExTest do
 
       assert LoroEx.get_text(source, "body") == LoroEx.get_text(mirror, "body")
     end
+
+    @tag :nif
+    test "dispatcher delivers under stress (1000 edits)" do
+      doc = LoroEx.new()
+      _sub = LoroEx.subscribe(doc, self())
+
+      n = 1_000
+      started = System.monotonic_time(:millisecond)
+
+      for i <- 1..n do
+        :ok = LoroEx.insert_text(doc, "body", 0, "#{rem(i, 10)}")
+      end
+
+      # Drain n events; with the mpsc dispatcher this completes in
+      # well under a second on a modern dev box. Allow 5s headroom for
+      # busier CI runners.
+      for _ <- 1..n do
+        assert_receive {:loro_event, _ref, _bytes}, 5_000
+      end
+
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      assert elapsed < 5_000,
+             "expected 1000 edits + deliveries in <5s, took #{elapsed}ms"
+    end
   end
 
   describe "map mutation" do
