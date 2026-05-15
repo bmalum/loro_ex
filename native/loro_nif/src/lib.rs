@@ -77,6 +77,7 @@ mod atoms {
         list,
         movable_list,
         tree,
+        counter,
 
         // Tree parent variants
         root,
@@ -242,6 +243,13 @@ fn get_movable_list_handle(doc: &LoroDoc, id: &str) -> loro::LoroMovableList {
     }
 }
 
+fn get_counter_handle(doc: &LoroDoc, id: &str) -> loro::LoroCounter {
+    match try_parse_container_id(id) {
+        Some(cid) => doc.get_counter(cid),
+        None => doc.get_counter(id),
+    }
+}
+
 fn get_tree_handle(doc: &LoroDoc, id: &str) -> loro::LoroTree {
     match try_parse_container_id(id) {
         Some(cid) => doc.get_tree(cid),
@@ -302,10 +310,12 @@ fn atom_to_container_type(a: Atom) -> NifResult<ContainerType> {
         Ok(ContainerType::MovableList)
     } else if a == atoms::tree() {
         Ok(ContainerType::Tree)
+    } else if a == atoms::counter() {
+        Ok(ContainerType::Counter)
     } else {
         Err(NifError::Term(Box::new((
             atoms::invalid_container_kind(),
-            "expected :text | :map | :list | :movable_list | :tree".to_string(),
+            "expected :text | :map | :list | :movable_list | :tree | :counter".to_string(),
         ))))
     }
 }
@@ -1191,9 +1201,14 @@ fn map_insert_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => map
+            .insert_container(&key, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1289,9 +1304,14 @@ fn map_get_or_create_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => map
+            .insert_container(&key, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1445,9 +1465,14 @@ fn list_insert_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => list
+            .insert_container(p, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1558,9 +1583,14 @@ fn list_get_or_create_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => list
+            .insert_container(len, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1767,9 +1797,14 @@ fn movable_list_insert_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => list
+            .insert_container(p, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1812,9 +1847,14 @@ fn movable_list_set_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => list
+            .set_container(i, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1899,9 +1939,14 @@ fn movable_list_get_or_create_container(
             .map_err(loro_err_to_nif)?
             .id()
             .to_string(),
+        ContainerType::Counter => list
+            .insert_container(len, loro::LoroCounter::new())
+            .map_err(loro_err_to_nif)?
+            .id()
+            .to_string(),
         _ => {
             return Err(invalid_value_err(
-                "only :text | :map | :list | :movable_list are supported",
+                "only :text | :map | :list | :movable_list | :counter are supported",
             ));
         }
     };
@@ -1985,6 +2030,48 @@ fn movable_list_get_last_editor_at(
     let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
     let list = get_movable_list_handle(&guard, &container_id);
     Ok(list.get_last_editor_at(pos as usize))
+}
+
+// ---------------------------------------------------------------------------
+// Counter
+// ---------------------------------------------------------------------------
+//
+// LoroCounter is a sum-CRDT over f64. Concurrent increments / decrements
+// converge to the sum across peers. Note the value type is f64, not i64 —
+// callers can pass integers via `Loro.counter_increment(doc, cid, 1)` (the
+// NIF coerces to f64 internally).
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn counter_increment(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    value: f64,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let counter = get_counter_handle(&guard, &container_id);
+    counter.increment(value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn counter_decrement(
+    doc: ResourceArc<DocResource>,
+    container_id: String,
+    value: f64,
+) -> NifResult<Atom> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let counter = get_counter_handle(&guard, &container_id);
+    counter.decrement(value).map_err(loro_err_to_nif)?;
+    guard.commit();
+    Ok(atoms::ok())
+}
+
+/// Return the current sum across all peers as an f64.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn counter_get(doc: ResourceArc<DocResource>, container_id: String) -> NifResult<f64> {
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    Ok(get_counter_handle(&guard, &container_id).get_value())
 }
 
 // ---------------------------------------------------------------------------

@@ -198,6 +198,12 @@ defmodule LoroEx.Native do
   def movable_list_get_last_mover_at(_doc, _cid, _pos), do: :erlang.nif_error(:nif_not_loaded)
   def movable_list_get_last_editor_at(_doc, _cid, _pos), do: :erlang.nif_error(:nif_not_loaded)
 
+  # Counter -------------------------------------------------------------------
+
+  def counter_increment(_doc, _cid, _value), do: :erlang.nif_error(:nif_not_loaded)
+  def counter_decrement(_doc, _cid, _value), do: :erlang.nif_error(:nif_not_loaded)
+  def counter_get(_doc, _cid), do: :erlang.nif_error(:nif_not_loaded)
+
   # Movable tree --------------------------------------------------------------
 
   def tree_create_node(_doc, _tree_id, _parent_id), do: :erlang.nif_error(:nif_not_loaded)

@@ -103,7 +103,7 @@ defmodule LoroEx do
   @typedoc "Either a root-container name or a serialized nested-container id."
   @type container_id :: String.t()
   @typedoc "Kind atom used when creating a nested container."
-  @type container_kind :: :text | :map | :list | :movable_list
+  @type container_kind :: :text | :map | :list | :movable_list | :counter
   @typedoc """
   Cursor bias when multiple ops land at the same position.
     * `:left` — treat inserts at this position as being *before* the cursor
@@ -2004,6 +2004,45 @@ defmodule LoroEx do
   @spec movable_list_get_last_editor_at(doc(), container_id(), non_neg_integer()) ::
           non_neg_integer() | nil | error()
   defdelegate movable_list_get_last_editor_at(doc, container_id, pos), to: Native
+
+  # ============================================================================
+  # Counter
+  # ============================================================================
+
+  @doc """
+  Increment a counter by `value`. Concurrent increments across peers
+  converge to their sum.
+
+  Counter values are floating point at the CRDT layer. Pass an
+  integer or float — both are accepted and stored as `f64`.
+
+  ## Example
+
+      doc = LoroEx.new()
+      cid = LoroEx.map_insert_container(doc, "stats", "views", :counter)
+
+      :ok = LoroEx.counter_increment(doc, cid, 5)
+      :ok = LoroEx.counter_increment(doc, cid, 0.5)
+      LoroEx.counter_get(doc, cid)
+      # => 5.5
+  """
+  @spec counter_increment(doc(), container_id(), number()) :: :ok | error()
+  def counter_increment(doc, container_id, value) when is_number(value),
+    do: Native.counter_increment(doc, container_id, value * 1.0)
+
+  @doc """
+  Decrement a counter by `value`. Equivalent to
+  `counter_increment(doc, cid, -value)`.
+  """
+  @spec counter_decrement(doc(), container_id(), number()) :: :ok | error()
+  def counter_decrement(doc, container_id, value) when is_number(value),
+    do: Native.counter_decrement(doc, container_id, value * 1.0)
+
+  @doc """
+  Return the current sum across all peers as a float.
+  """
+  @spec counter_get(doc(), container_id()) :: float() | error()
+  defdelegate counter_get(doc, container_id), to: Native
 
   # ============================================================================
   # Tree (movable)
