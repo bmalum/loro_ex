@@ -9,6 +9,7 @@ defmodule LoroEx.MixProject do
       app: :loro_ex,
       version: @version,
       elixir: "~> 1.17",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: description(),
@@ -29,6 +30,9 @@ defmodule LoroEx.MixProject do
   def application do
     [extra_applications: [:logger]]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
