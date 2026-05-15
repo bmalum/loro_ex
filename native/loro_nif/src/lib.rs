@@ -89,7 +89,9 @@ mod atoms {
         // Event tags
         loro_event,
         loro_diff,
-        loro_ephemeral
+        loro_ephemeral,
+        loro_pre_commit,
+        loro_peer_id_change
     }
 }
 
@@ -175,6 +177,16 @@ mod dispatcher {
             sub_ref: ResourceArc<SubscriptionResource>,
             bytes: Vec<u8>,
         },
+        PreCommit {
+            target: LocalPid,
+            sub_ref: ResourceArc<SubscriptionResource>,
+            json_bytes: Vec<u8>,
+        },
+        PeerIdChange {
+            target: LocalPid,
+            sub_ref: ResourceArc<SubscriptionResource>,
+            peer_id: u64,
+        },
     }
 
     static SENDER: OnceLock<Sender<Message>> = OnceLock::new();
@@ -236,6 +248,27 @@ mod dispatcher {
                     bin.as_mut_slice().copy_from_slice(&bytes);
                     let bin_term: rustler::Term = bin.into();
                     (atoms::loro_ephemeral(), sub_ref, bin_term).encode(env)
+                });
+            }
+            Message::PreCommit {
+                target,
+                sub_ref,
+                json_bytes,
+            } => {
+                let _ = env.send_and_clear(&target, |env| {
+                    let mut bin = rustler::NewBinary::new(env, json_bytes.len());
+                    bin.as_mut_slice().copy_from_slice(&json_bytes);
+                    let bin_term: rustler::Term = bin.into();
+                    (atoms::loro_pre_commit(), sub_ref, bin_term).encode(env)
+                });
+            }
+            Message::PeerIdChange {
+                target,
+                sub_ref,
+                peer_id,
+            } => {
+                let _ = env.send_and_clear(&target, |env| {
+                    (atoms::loro_peer_id_change(), sub_ref, peer_id).encode(env)
                 });
             }
         }
@@ -2644,6 +2677,89 @@ fn subscribe_root(
             let events_value = serialize_diff_events(&event.events);
             deliver_diff_event(pid, sub_for_callback.clone(), events_value);
         }));
+    if let Ok(mut slot) = sub_resource.inner.lock() {
+        *slot = Some(subscription);
+    }
+    Ok(sub_resource)
+}
+
+/// Subscribe to a callback that fires *before* every commit. The
+/// payload includes the change_meta (id, lamport, deps, op count) and
+/// the origin string.
+///
+/// Concurrency: pre-commit callbacks run inside `commit()` and must
+/// not re-enter the doc — they hold the same mutex as the surrounding
+/// commit. We dispatch by sending into the mpsc channel, which is
+/// non-blocking, so the receiver pid sees the event after the commit
+/// has finished.
+///
+/// Receiver gets `{:loro_pre_commit, sub_ref, json_binary}` where
+/// `json_binary` decodes to a map with keys `origin`, `id` (peer +
+/// counter as a `[peer, counter]` array), `lamport`, `len`, `deps`
+/// (array of `[peer, counter]` arrays), and `timestamp`.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn subscribe_pre_commit(
+    doc: ResourceArc<DocResource>,
+    pid: LocalPid,
+) -> NifResult<ResourceArc<SubscriptionResource>> {
+    let sub_resource = ResourceArc::new(SubscriptionResource {
+        inner: Mutex::new(None),
+    });
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let sub_for_callback = sub_resource.clone();
+    let subscription = guard.subscribe_pre_commit(Box::new(move |payload| {
+        let meta = &payload.change_meta;
+        let deps: Vec<serde_json::Value> = meta
+            .deps
+            .iter()
+            .map(|id| serde_json::json!([id.peer, id.counter]))
+            .collect();
+        let json = serde_json::json!({
+            "origin": payload.origin.to_string(),
+            "id": [meta.id.peer, meta.id.counter],
+            "lamport": meta.lamport,
+            "len": meta.len,
+            "deps": deps,
+            "timestamp": meta.timestamp,
+        });
+        if let Ok(json_str) = serde_json::to_string(&json) {
+            dispatcher::send(dispatcher::Message::PreCommit {
+                target: pid,
+                sub_ref: sub_for_callback.clone(),
+                json_bytes: json_str.into_bytes(),
+            });
+        }
+        true
+    }));
+    if let Ok(mut slot) = sub_resource.inner.lock() {
+        *slot = Some(subscription);
+    }
+    Ok(sub_resource)
+}
+
+/// Subscribe to a callback that fires when the doc's peer id changes
+/// (typically via `set_peer_id/2`).
+///
+/// Receiver gets `{:loro_peer_id_change, sub_ref, peer_id}` where
+/// `peer_id` is the integer id of the new peer.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn subscribe_peer_id_change(
+    doc: ResourceArc<DocResource>,
+    pid: LocalPid,
+) -> NifResult<ResourceArc<SubscriptionResource>> {
+    let sub_resource = ResourceArc::new(SubscriptionResource {
+        inner: Mutex::new(None),
+    });
+    let guard = doc.inner.lock().map_err(|_| poisoned_to_nif())?;
+    let sub_for_callback = sub_resource.clone();
+    let subscription = guard.subscribe_peer_id_change(Box::new(move |id| {
+        dispatcher::send(dispatcher::Message::PeerIdChange {
+            target: pid,
+            sub_ref: sub_for_callback.clone(),
+            peer_id: id.peer,
+        });
+        true
+    }));
     if let Ok(mut slot) = sub_resource.inner.lock() {
         *slot = Some(subscription);
     }

@@ -2420,6 +2420,63 @@ defmodule LoroEx do
   @spec subscribe_root(doc(), pid()) :: subscription() | error()
   defdelegate subscribe_root(doc, pid), to: Native
 
+  @doc """
+  Subscribe to a callback that fires before every commit. Useful for
+  validation, audit logging, or rate limiting on a server doc.
+
+  Receiver gets `{:loro_pre_commit, sub_ref, json_binary}` where
+  `json_binary` decodes to a map with keys:
+
+    * `"origin"` — string set via Loro's commit-origin API; `""` for
+      regular commits, populated by callers using `import_with/3`-style
+      origin tagging.
+    * `"id"` — `[peer_id, counter]` of the change being committed.
+    * `"lamport"` — Lamport clock at this change.
+    * `"len"` — number of ops in the change.
+    * `"deps"` — array of `[peer_id, counter]` parents.
+    * `"timestamp"` — Unix timestamp (0 if Loro is not configured to
+      record timestamps).
+
+  ## Concurrency
+
+  Pre-commit callbacks run inside `commit/0` and **must not re-enter
+  the doc** — they execute under the same mutex as the surrounding
+  commit. The dispatcher delivers the message asynchronously via
+  mpsc, so the receiver pid sees the event after the commit
+  completes.
+
+  ## Example
+
+      sub = LoroEx.subscribe_pre_commit(doc, self())
+      :ok = LoroEx.insert_text(doc, "body", 0, "x")
+
+      receive do
+        {:loro_pre_commit, ^sub, json} ->
+          %{"id" => [peer, _]} = Jason.decode!(json)
+          Logger.info("commit from peer \#{peer}")
+      end
+  """
+  @spec subscribe_pre_commit(doc(), pid()) :: subscription() | error()
+  defdelegate subscribe_pre_commit(doc, pid), to: Native
+
+  @doc """
+  Subscribe to a callback that fires when the doc's peer id changes
+  (typically via `set_peer_id/2`).
+
+  Receiver gets `{:loro_peer_id_change, sub_ref, peer_id}` where
+  `peer_id` is the integer id of the new peer.
+
+  ## Example
+
+      _sub = LoroEx.subscribe_peer_id_change(doc, self())
+      :ok = LoroEx.set_peer_id(doc, 42)
+      receive do
+        {:loro_peer_id_change, _ref, 42} -> :ok
+      end
+  """
+  @spec subscribe_peer_id_change(doc(), pid()) :: subscription() | error()
+  defdelegate subscribe_peer_id_change(doc, pid), to: Native
+
   # ============================================================================
   # Submodules
   # ============================================================================
