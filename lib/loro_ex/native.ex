@@ -71,6 +71,18 @@ defmodule LoroEx.Native do
   def import_batch(_doc, _updates), do: :erlang.nif_error(:nif_not_loaded)
   def decode_import_blob_meta(_bytes, _check_checksum), do: :erlang.nif_error(:nif_not_loaded)
   def revert_to(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Time travel --------------------------------------------------------------
+
+  def checkout(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
+  def checkout_to_latest(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def attach(_doc), do: :erlang.nif_error(:nif_not_loaded)
+  def detach(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  # credo:disable-for-next-line Credo.Check.Readability.PredicateFunctionNames
+  def is_detached(_doc), do: :erlang.nif_error(:nif_not_loaded)
+
+  def set_detached_editing(_doc, _enable), do: :erlang.nif_error(:nif_not_loaded)
   def export_snapshot(_doc), do: :erlang.nif_error(:nif_not_loaded)
   def export_shallow_snapshot(_doc, _frontier), do: :erlang.nif_error(:nif_not_loaded)
   def export_updates_from(_doc, _version), do: :erlang.nif_error(:nif_not_loaded)
