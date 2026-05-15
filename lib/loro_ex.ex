@@ -140,6 +140,7 @@ defmodule LoroEx do
           | :id_not_found
           | :lock_poisoned
           | :ephemeral_apply_failed
+          | :invalid_path
           | :unknown
   @type error :: {:error, {error_reason(), String.t()}}
 
@@ -854,6 +855,62 @@ defmodule LoroEx do
   """
   @spec get_deep_value_with_id(doc()) :: String.t() | error()
   defdelegate get_deep_value_with_id(doc), to: Native
+
+  # ============================================================================
+  # JSON-path queries
+  # ============================================================================
+
+  @doc """
+  Look up a single value or container at a slash-separated path.
+  Returns the deep value as a JSON string, or `"null"` if the path
+  resolves to nothing.
+
+  Path syntax is Loro-native: `<root_container>/<key_or_index>/...`.
+  Common patterns:
+
+    * `"body"` — root-level container named `body`
+    * `"settings/theme"` — nested map key
+    * `"events/0"` — list / movable-list element by index
+    * `"tree/0/name"` — meta-map key on a tree node by index
+
+  Use `jsonpath/2` for richer queries (wildcards, filters,
+  RFC-9535-style expressions).
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.insert_text(doc, "body", 0, "hello")
+
+      LoroEx.get_by_str_path(doc, "body")
+      # => ~s("hello")
+
+      LoroEx.get_by_str_path(doc, "does_not_exist")
+      # => "null"
+  """
+  @spec get_by_str_path(doc(), String.t()) :: String.t() | error()
+  defdelegate get_by_str_path(doc, path), to: Native
+
+  @doc """
+  Run a JSON-path query and return all matches as a JSON array
+  string. An empty array `"[]"` means no matches.
+
+  Uses RFC-9535-style syntax (`$.events[*]`, `$.users.*.name`, …)
+  unlike `get_by_str_path/2` which is slash-separated.
+
+  Errors with `{:error, {:invalid_path, _}}` if the expression
+  itself doesn't parse.
+
+  ## Example
+
+      doc = LoroEx.new()
+      :ok = LoroEx.list_push(doc, "events", ~s("login"))
+      :ok = LoroEx.list_push(doc, "events", ~s("edit"))
+
+      LoroEx.jsonpath(doc, "$.events[*]") |> Jason.decode!()
+      # => ["login", "edit"]
+  """
+  @spec jsonpath(doc(), String.t()) :: String.t() | error()
+  defdelegate jsonpath(doc, path), to: Native
 
   # ============================================================================
   # Memory hygiene
