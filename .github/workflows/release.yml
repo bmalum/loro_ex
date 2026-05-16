@@ -49,7 +49,7 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      - uses: philss/rustler-precompiled-action@v1.1.4
+      - uses: philss/rustler-precompiled-action@v1.1.5
         id: build-crate
         with:
           project-name: loro_nif
