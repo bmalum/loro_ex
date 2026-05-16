@@ -1,5 +1,5 @@
 %{
-  "libloro_nif-v0.9.1-nif-2.17-aarch64-apple-darwin.so.tar.gz" => "sha256:cac387f3d7a176227df4c064d64f0a29d9517d186cf488fa5eaeba981edf8b96",
-  "libloro_nif-v0.9.1-nif-2.17-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:da16292a2d3142fd78632e65a3294f29dcf8b54683f5591222ab7c8e9bb29034",
-  "libloro_nif-v0.9.1-nif-2.17-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:77c1f84b4b4ae9260c941ac87a3f0e6dabda6678e78c691528b54418fea0f80b",
+  "libloro_nif-v0.9.1-nif-2.17-aarch64-apple-darwin.so.tar.gz" => "sha256:b22e1e5b82d10e9907bbbe4e741e7779a21d5c71c2808abe67c7de138f5cac62",
+  "libloro_nif-v0.9.1-nif-2.17-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:33d5a8907fc5057b67e16053f76fe5fef5f8833f4e53ecad983a551edd19fb0a",
+  "libloro_nif-v0.9.1-nif-2.17-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:803150680de6a0061e653d7c7184c3304ecce57d1cd1c1f29f6da915131e6999",
 }
