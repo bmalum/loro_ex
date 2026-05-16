@@ -1,10 +1,5 @@
 name: Build precompiled NIF artifacts
 
-# Triggered on tag push (vN.N.N). Builds the loro_nif crate for each
-# supported target, uploads the .so to the GitHub Release, and the
-# rustler_precompiled action also generates a checksum entry consumers
-# verify against.
-
 on:
   push:
     tags:
@@ -18,57 +13,116 @@ on:
 permissions:
   contents: write
 
+env:
+  NIF_VERSION: "2.17"
+
 jobs:
-  build_release:
-    name: NIF ${{ matrix.nif }} - ${{ matrix.job.target }} (${{ matrix.job.os }})
-    runs-on: ${{ matrix.job.os }}
+  # -------------------------------------------------------------------------
+  # Linux builds — use rustler-precompiled-action for cross-compilation
+  # -------------------------------------------------------------------------
+  linux:
+    name: NIF ${{ matrix.target }} (Linux)
+    runs-on: ubuntu-22.04
 
     strategy:
       fail-fast: false
       matrix:
-        nif: ["2.17"]
-        job:
-          - { target: aarch64-apple-darwin,        os: macos-14 }
-          - { target: x86_64-apple-darwin,         os: macos-13 }
-          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-22.04, use-cross: true }
-          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-22.04 }
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use-cross: false
+          - target: aarch64-unknown-linux-gnu
+            use-cross: true
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract project info
+      - name: Extract version
         id: project
-        shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             tag="${{ github.event.inputs.tag }}"
           else
             tag="${GITHUB_REF#refs/tags/}"
           fi
-          version="${tag#v}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - uses: philss/rustler-precompiled-action@v1.1.5
-        id: build-crate
+        id: build
         with:
           project-name: loro_nif
           project-version: ${{ steps.project.outputs.version }}
-          target: ${{ matrix.job.target }}
-          nif-version: ${{ matrix.nif }}
-          use-cross: ${{ matrix.job.use-cross == true }}
+          target: ${{ matrix.target }}
+          nif-version: ${{ env.NIF_VERSION }}
+          use-cross: ${{ matrix.use-cross }}
           project-dir: "native/loro_nif"
-
-      - name: Artifact summary
-        shell: bash
-        run: |
-          echo "Built artifact:"
-          ls -lh "${{ steps.build-crate.outputs.file-path }}"
-          shasum -a 256 "${{ steps.build-crate.outputs.file-path }}"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.project.outputs.tag }}
-          files: ${{ steps.build-crate.outputs.file-path }}
+          files: ${{ steps.build.outputs.file-path }}
+          fail_on_unmatched_files: true
+
+  # -------------------------------------------------------------------------
+  # macOS builds — native cargo build (no cross needed)
+  # -------------------------------------------------------------------------
+  macos:
+    name: NIF ${{ matrix.target }} (macOS)
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: project
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build NIF
+        run: |
+          cd native/loro_nif
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifact
+        id: package
+        run: |
+          VERSION="${{ steps.project.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          LIB_NAME="libloro_nif"
+          EXT="dylib"
+          SRC="native/loro_nif/target/${TARGET}/release/${LIB_NAME}.${EXT}"
+          ARCHIVE_NAME="${LIB_NAME}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+
+          tar -czf "${ARCHIVE_NAME}" -C "$(dirname ${SRC})" "$(basename ${SRC})"
+          echo "file-path=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Built: ${ARCHIVE_NAME} ($(du -h ${ARCHIVE_NAME} | cut -f1))"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.project.outputs.tag }}
+          files: ${{ steps.package.outputs.file-path }}
           fail_on_unmatched_files: true
