@@ -163,5 +163,6 @@ jobs:
       - name: Force-push tag to include checksum file
         run: |
           TAG="${{ github.event.inputs.tag }}"
-          git tag -fa "${TAG}" -m "${TAG}"
+          # Tag the current HEAD (which now includes the checksum commit)
+          git tag -fa "${TAG}" -m "${TAG}" HEAD
           git push origin "${TAG}" --force
