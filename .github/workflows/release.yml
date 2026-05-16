@@ -112,9 +112,10 @@ jobs:
           VERSION="${{ steps.project.outputs.version }}"
           TARGET="${{ matrix.target }}"
           LIB_NAME="libloro_nif"
-          EXT="dylib"
-          SRC="native/loro_nif/target/${TARGET}/release/${LIB_NAME}.${EXT}"
-          ARCHIVE_NAME="${LIB_NAME}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.tar.gz"
+          SRC="native/loro_nif/target/${TARGET}/release/${LIB_NAME}.dylib"
+          # rustler_precompiled expects the archive name to include .so
+          # regardless of the actual library extension on the platform.
+          ARCHIVE_NAME="${LIB_NAME}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so.tar.gz"
 
           tar -czf "${ARCHIVE_NAME}" -C "$(dirname ${SRC})" "$(basename ${SRC})"
           echo "file-path=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
