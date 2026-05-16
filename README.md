@@ -39,7 +39,7 @@ artifact publishing.
 
 ```elixir
 # Add to your mix.exs deps:
-{:loro_ex, git: "https://github.com/bmalum/loro_ex.git", tag: "v0.9.0"}
+{:loro_ex, git: "https://github.com/bmalum/loro_ex.git", tag: "v0.9.1"}
 ```
 
 ```elixir
@@ -88,7 +88,7 @@ def deps do
   [
     {:loro_ex,
      git: "https://github.com/bmalum/loro_ex.git",
-     tag: "v0.8.0"}
+     tag: "v0.9.1"}
   ]
 end
 ```

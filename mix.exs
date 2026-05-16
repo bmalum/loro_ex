@@ -1,7 +1,7 @@
 defmodule LoroEx.MixProject do
   use Mix.Project
 
-  @version "0.9.0"
+  @version "0.9.1"
   @source_url "https://github.com/bmalum/loro_ex"
 
   def project do
@@ -38,11 +38,9 @@ defmodule LoroEx.MixProject do
     [
       # Runtime
       {:rustler_precompiled, "~> 0.8"},
-      # Kept as optional so consumers who set FORCE_LORO_EX_BUILD=true (or
-      # whose target isn't in our prebuilt matrix) can still build from
-      # source. `optional: true` means rustler is only resolved when a
-      # downstream actually needs it for the source-build path.
-      {:rustler, "~> 0.37", optional: true},
+      # Required for source builds (unsupported targets, FORCE_LORO_EX_BUILD=1,
+      # or development). rustler_precompiled invokes it when force_build is true.
+      {:rustler, "~> 0.37"},
       {:jason, "~> 1.4"},
 
       # Dev / test
