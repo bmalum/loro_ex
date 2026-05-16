@@ -34,7 +34,6 @@ defmodule LoroEx.Native do
     version: Mix.Project.config()[:version],
     targets: ~w(
       aarch64-apple-darwin
-      x86_64-apple-darwin
       aarch64-unknown-linux-gnu
       x86_64-unknown-linux-gnu
     ),
