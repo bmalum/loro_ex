@@ -113,11 +113,16 @@ jobs:
           TARGET="${{ matrix.target }}"
           LIB_NAME="libloro_nif"
           SRC="native/loro_nif/target/${TARGET}/release/${LIB_NAME}.dylib"
-          # rustler_precompiled expects the archive name to include .so
-          # regardless of the actual library extension on the platform.
-          ARCHIVE_NAME="${LIB_NAME}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so.tar.gz"
+          # rustler_precompiled expects the file inside the tar to be named
+          # with the full target-qualified name and .so extension.
+          INNER_NAME="${LIB_NAME}-v${VERSION}-nif-${NIF_VERSION}-${TARGET}.so"
+          ARCHIVE_NAME="${INNER_NAME}.tar.gz"
 
-          tar -czf "${ARCHIVE_NAME}" -C "$(dirname ${SRC})" "$(basename ${SRC})"
+          # Copy and rename for the tar
+          cp "${SRC}" "${INNER_NAME}"
+          tar -czf "${ARCHIVE_NAME}" "${INNER_NAME}"
+          rm "${INNER_NAME}"
+
           echo "file-path=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
           echo "Built: ${ARCHIVE_NAME} ($(du -h ${ARCHIVE_NAME} | cut -f1))"
 
